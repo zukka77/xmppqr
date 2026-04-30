@@ -1,0 +1,114 @@
+package memstore
+
+import (
+	"context"
+	"sync"
+
+	"github.com/danielinux/xmppqr/internal/storage"
+)
+
+type pepNodeKey struct{ owner, node string }
+type pepItemKey struct{ owner, node, itemID string }
+
+type pepStore struct {
+	mu    sync.RWMutex
+	nodes map[pepNodeKey]*storage.PEPNode
+	items map[pepItemKey]*storage.PEPItem
+	order []pepItemKey
+}
+
+func newPEPStore() *pepStore {
+	return &pepStore{
+		nodes: make(map[pepNodeKey]*storage.PEPNode),
+		items: make(map[pepItemKey]*storage.PEPItem),
+	}
+}
+
+func (s *pepStore) PutNode(_ context.Context, node *storage.PEPNode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *node
+	s.nodes[pepNodeKey{node.Owner, node.Node}] = &cp
+	return nil
+}
+
+func (s *pepStore) GetNode(_ context.Context, owner, node string) (*storage.PEPNode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n, ok := s.nodes[pepNodeKey{owner, node}]
+	if !ok {
+		return nil, errNotFound
+	}
+	cp := *n
+	return &cp, nil
+}
+
+func (s *pepStore) DeleteNode(_ context.Context, owner, node string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.nodes, pepNodeKey{owner, node})
+	kept := s.order[:0]
+	for _, k := range s.order {
+		if k.owner == owner && k.node == node {
+			delete(s.items, k)
+		} else {
+			kept = append(kept, k)
+		}
+	}
+	s.order = kept
+	return nil
+}
+
+func (s *pepStore) PutItem(_ context.Context, item *storage.PEPItem) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := pepItemKey{item.Owner, item.Node, item.ItemID}
+	if _, exists := s.items[k]; !exists {
+		s.order = append(s.order, k)
+	}
+	cp := *item
+	s.items[k] = &cp
+	return nil
+}
+
+func (s *pepStore) GetItem(_ context.Context, owner, node, itemID string) (*storage.PEPItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	it, ok := s.items[pepItemKey{owner, node, itemID}]
+	if !ok {
+		return nil, errNotFound
+	}
+	cp := *it
+	return &cp, nil
+}
+
+func (s *pepStore) ListItems(_ context.Context, owner, node string, limit int) ([]*storage.PEPItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*storage.PEPItem
+	for _, k := range s.order {
+		if k.owner == owner && k.node == node {
+			cp := *s.items[k]
+			out = append(out, &cp)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *pepStore) DeleteItem(_ context.Context, owner, node, itemID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := pepItemKey{owner, node, itemID}
+	delete(s.items, k)
+	kept := s.order[:0]
+	for _, ok := range s.order {
+		if ok != k {
+			kept = append(kept, ok)
+		}
+	}
+	s.order = kept
+	return nil
+}

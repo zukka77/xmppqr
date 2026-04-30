@@ -1,0 +1,40 @@
+server:
+  domain: example.com
+  hostname: xmpp.example.com
+  resource_prefix: xmppqr
+
+listeners:
+  c2s_starttls: ":5222"
+  c2s_directtls: ":5223"
+  s2s: ":5269"
+  http_upload: ":5443"
+  admin_pprof: "127.0.0.1:6060"
+
+tls:
+  cert_file: /etc/xmppqr/tls/cert.pem
+  key_file: /etc/xmppqr/tls/key.pem
+  min_version: TLS1.2
+  prefer_pq_hybrid: true
+  client_ca_file: ""
+
+db:
+  driver: postgres
+  dsn: "host=localhost port=5432 user=xmppqr password=secret dbname=xmppqr sslmode=disable"
+  max_conns: 20
+  migrate_on_start: true
+
+log:
+  level: info
+  format: text
+  redact_stanzas: true
+
+modules:
+  mam: true
+  push: true
+  carbons: true
+  muc: true
+  http_upload: true
+  pep: true
+  sm: true
+  csi: true
+  spqr_item_max_bytes: 262144

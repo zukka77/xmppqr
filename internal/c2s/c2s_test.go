@@ -1,0 +1,662 @@
+package c2s
+
+import (
+	"context"
+	"encoding/base64"
+	"fmt"
+	"log/slog"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/danielinux/xmppqr/internal/auth"
+	"github.com/danielinux/xmppqr/internal/carbons"
+	"github.com/danielinux/xmppqr/internal/disco"
+	"github.com/danielinux/xmppqr/internal/mam"
+	"github.com/danielinux/xmppqr/internal/pubsub"
+	"github.com/danielinux/xmppqr/internal/roster"
+	"github.com/danielinux/xmppqr/internal/router"
+	"github.com/danielinux/xmppqr/internal/sm"
+	"github.com/danielinux/xmppqr/internal/storage"
+	"github.com/danielinux/xmppqr/internal/storage/memstore"
+	"github.com/danielinux/xmppqr/internal/stanza"
+	xtls "github.com/danielinux/xmppqr/internal/tls"
+)
+
+// mockTLSConn wraps net.Conn and satisfies TLSConn.
+type mockTLSConn struct {
+	net.Conn
+}
+
+func (m *mockTLSConn) Exporter(label string, ctx []byte, n int) ([]byte, error) {
+	out := make([]byte, n)
+	copy(out, []byte("fake-tls-exporter-bytes-1234"))
+	return out, nil
+}
+
+func (m *mockTLSConn) HandshakeState() xtls.HandshakeState {
+	return xtls.HandshakeState{Version: 0x0304}
+}
+
+// routerMockSession satisfies router.Session for routing tests.
+type routerMockSession struct {
+	j         stanza.JID
+	available bool
+	priority  int
+	ch        chan []byte
+}
+
+func (m *routerMockSession) JID() stanza.JID { return m.j }
+func (m *routerMockSession) Priority() int   { return m.priority }
+func (m *routerMockSession) IsAvailable() bool { return m.available }
+func (m *routerMockSession) Deliver(_ context.Context, raw []byte) error {
+	select {
+	case m.ch <- raw:
+	default:
+	}
+	return nil
+}
+
+func makeTestConfig(stores *storage.Stores, r *router.Router, rs *sm.Store) SessionConfig {
+	return SessionConfig{
+		Domain:         "example.com",
+		Stores:         stores,
+		Router:         r,
+		ResumeStore:    rs,
+		MaxStanzaBytes: 1 << 20,
+	}
+}
+
+func testPipe(t *testing.T) (net.Conn, net.Conn) {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close(); server.Close() })
+	return client, server
+}
+
+func sendStr(t *testing.T, conn net.Conn, s string) {
+	t.Helper()
+	conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write([]byte(s)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+}
+
+func readUntil(t *testing.T, conn net.Conn, want string, timeout time.Duration) string {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	var buf strings.Builder
+	tmp := make([]byte, 4096)
+	for {
+		n, err := conn.Read(tmp)
+		if n > 0 {
+			buf.Write(tmp[:n])
+			if strings.Contains(buf.String(), want) {
+				return buf.String()
+			}
+		}
+		if err != nil {
+			return buf.String()
+		}
+	}
+}
+
+func prepareUser(t *testing.T, stores *storage.Stores, username, password string) {
+	t.Helper()
+	salt := []byte("testsalt12345678")
+	creds, err := auth.DeriveSCRAMCreds([]byte(password), salt, 4096, auth.SCRAMSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &storage.User{
+		Username:     username,
+		ScramSalt:    salt,
+		ScramIter:    4096,
+		StoredKey256: creds.StoredKey,
+		ServerKey256: creds.ServerKey,
+	}
+	if err := stores.Users.Put(context.Background(), u); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// driveSCRAMSHA256 performs a SCRAM-SHA-256 exchange from the client side.
+// It returns all server output collected after the final send.
+func driveSCRAMSHA256(t *testing.T, client net.Conn, username, password string) string {
+	t.Helper()
+	clientNonce := "testclientnonce1"
+	clientFirstBare := fmt.Sprintf("n=%s,r=%s", username, clientNonce)
+	clientFirst := "n,," + clientFirstBare
+	clientFirstB64 := base64.StdEncoding.EncodeToString([]byte(clientFirst))
+
+	sendStr(t, client, fmt.Sprintf(
+		`<authenticate xmlns='%s' mechanism='SCRAM-SHA-256'><initial-response>%s</initial-response></authenticate>`,
+		nsSASL2, clientFirstB64,
+	))
+
+	raw := readUntil(t, client, "</challenge>", 3*time.Second)
+	// Extract challenge base64
+	challengeB64 := extractTagContent(raw, "challenge")
+	if challengeB64 == "" {
+		t.Fatalf("no challenge received, got: %s", raw)
+	}
+	challengeBytes, err := base64.StdEncoding.DecodeString(challengeB64)
+	if err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	serverFirst := string(challengeBytes)
+
+	fields := parseKVTest(serverFirst)
+	saltB64 := fields["s"]
+	iterStr := fields["i"]
+	combinedNonce := fields["r"]
+	salt, _ := base64.StdEncoding.DecodeString(saltB64)
+	var iter int
+	fmt.Sscanf(iterStr, "%d", &iter)
+
+	// Re-derive from salted password
+	saltedPwd, err := goSHA256PBKDF2([]byte(password), salt, iter, 32)
+	if err != nil {
+		t.Fatalf("pbkdf2: %v", err)
+	}
+	clientKey := goHMACSHA256(saltedPwd, []byte("Client Key"))
+	storedKey := goSHA256(clientKey)
+	serverKey := goHMACSHA256(saltedPwd, []byte("Server Key"))
+	_ = serverKey
+
+	cbindB64 := base64.StdEncoding.EncodeToString([]byte("n,,"))
+	clientFinalWithoutProof := fmt.Sprintf("c=%s,r=%s", cbindB64, combinedNonce)
+	authMessage := clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
+
+	clientSig := goHMACSHA256(storedKey[:], []byte(authMessage))
+	proof := make([]byte, len(clientKey))
+	for i := range clientKey {
+		proof[i] = clientKey[i] ^ clientSig[i]
+	}
+	proofB64 := base64.StdEncoding.EncodeToString(proof)
+
+	clientFinal := clientFinalWithoutProof + ",p=" + proofB64
+	clientFinalB64 := base64.StdEncoding.EncodeToString([]byte(clientFinal))
+
+	sendStr(t, client, fmt.Sprintf(`<response xmlns='%s'>%s</response>`, nsSASL2, clientFinalB64))
+
+	return readUntil(t, client, "</", 3*time.Second)
+}
+
+func extractTagContent(s, tagName string) string {
+	open := "<" + tagName
+	close := "</" + tagName + ">"
+	start := strings.Index(s, open)
+	if start < 0 {
+		return ""
+	}
+	gt := strings.Index(s[start:], ">")
+	if gt < 0 {
+		return ""
+	}
+	content := s[start+gt+1:]
+	end := strings.Index(content, close)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(content[:end])
+}
+
+func parseKVTest(s string) map[string]string {
+	m := make(map[string]string)
+	for _, part := range strings.Split(s, ",") {
+		idx := strings.IndexByte(part, '=')
+		if idx < 0 {
+			continue
+		}
+		m[part[:idx]] = part[idx+1:]
+	}
+	return m
+}
+
+func TestStreamOpenAndFeatures(t *testing.T) {
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, makeTestConfig(memstore.New(), router.New(), sm.NewStore(64)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	sendStr(t, client, `<?xml version='1.0'?><stream:stream from='user@example.com' to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+
+	got := readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+	if !strings.Contains(got, "<stream:stream") {
+		t.Errorf("missing stream header; got: %s", got)
+	}
+	if !strings.Contains(got, nsSASL2) {
+		t.Errorf("missing SASL2 ns; got: %s", got)
+	}
+	if !strings.Contains(got, "SCRAM-SHA-256") {
+		t.Errorf("missing SCRAM-SHA-256; got: %s", got)
+	}
+}
+
+func TestStreamErrorOnHostUnknown(t *testing.T) {
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, makeTestConfig(memstore.New(), router.New(), sm.NewStore(64)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	sendStr(t, client, `<stream:stream to='other.domain' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>`)
+
+	got := readUntil(t, client, "host-unknown", 3*time.Second)
+	if !strings.Contains(got, "host-unknown") {
+		t.Errorf("expected host-unknown; got: %s", got)
+	}
+}
+
+func TestSASL2Success(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "secret")
+
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, makeTestConfig(stores, router.New(), sm.NewStore(64)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+
+	result := driveSCRAMSHA256(t, client, "alice", "secret")
+	if !strings.Contains(result, "<success") {
+		t.Errorf("expected success; got: %s", result)
+	}
+	if !strings.Contains(result, "alice@example.com") {
+		t.Errorf("expected JID in success; got: %s", result)
+	}
+}
+
+func TestSASL2Failure(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "bob", "correctpassword")
+
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, makeTestConfig(stores, router.New(), sm.NewStore(64)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+
+	result := driveSCRAMSHA256(t, client, "bob", "wrongpassword")
+	if !strings.Contains(result, "failure") && !strings.Contains(result, "not-authorized") {
+		t.Errorf("expected failure; got: %s", result)
+	}
+}
+
+func TestBind2InlineSM(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "charlie", "pass123")
+
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, makeTestConfig(stores, router.New(), sm.NewStore(64)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+
+	result := driveSCRAMSHA256(t, client, "charlie", "pass123")
+	if !strings.Contains(result, "<success") {
+		t.Errorf("expected success; got: %s", result)
+	}
+	// Verify jid was assigned
+	if s.jid.Local == "" {
+		t.Error("session JID not set after auth")
+	}
+	if s.jid.Resource == "" {
+		t.Error("session resource not allocated after bind")
+	}
+}
+
+// authenticateSession drives a full SASL2 auth and returns the client conn ready for stanzas.
+func authenticateSession(t *testing.T, stores *storage.Stores, mods *Modules, username, password string) (net.Conn, context.CancelFunc) {
+	t.Helper()
+	r := router.New()
+	rs := sm.NewStore(64)
+	cfg := SessionConfig{
+		Domain:         "example.com",
+		Stores:         stores,
+		Router:         r,
+		ResumeStore:    rs,
+		MaxStanzaBytes: 1 << 20,
+		Modules:        mods,
+	}
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	go s.Run(ctx)
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+	result := driveSCRAMSHA256(t, client, username, password)
+	if !strings.Contains(result, "<success") {
+		t.Fatalf("auth failed: %s", result)
+	}
+	time.Sleep(20 * time.Millisecond)
+	return client, cancel
+}
+
+func TestPingIQ(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "pinguser", "pass")
+	client, cancel := authenticateSession(t, stores, nil, "pinguser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='1' type='get'><ping xmlns='urn:xmpp:ping'/></iq>`)
+	got := readUntil(t, client, "result", 3*time.Second)
+	if !strings.Contains(got, "1") || !strings.Contains(got, "result") {
+		t.Errorf("expected ping result; got: %s", got)
+	}
+}
+
+func TestUnknownIQNamespace(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "unkuser", "pass")
+	client, cancel := authenticateSession(t, stores, nil, "unkuser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='2' type='get'><query xmlns='urn:example:unknown'/></iq>`)
+	got := readUntil(t, client, "feature-not-implemented", 3*time.Second)
+	if !strings.Contains(got, "feature-not-implemented") {
+		t.Errorf("expected feature-not-implemented; got: %s", got)
+	}
+}
+
+func TestDiscoInfo(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "discouser", "pass")
+	mods := &Modules{Disco: disco.DefaultServer()}
+	client, cancel := authenticateSession(t, stores, mods, "discouser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='3' type='get'><query xmlns='http://jabber.org/protocol/disco#info'/></iq>`)
+	got := readUntil(t, client, "</query>", 3*time.Second)
+	if !strings.Contains(got, "<identity") {
+		t.Errorf("expected identity element; got: %s", got)
+	}
+	if !strings.Contains(got, "<feature") {
+		t.Errorf("expected feature elements; got: %s", got)
+	}
+}
+
+func TestStanzaRouting(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "dave", "pass")
+
+	r := router.New()
+	rs := sm.NewStore(64)
+
+	delivered := make(chan []byte, 4)
+	targetJID, _ := stanza.Parse("eve@example.com/res1")
+	target := &routerMockSession{
+		j:         targetJID,
+		available: true,
+		ch:        delivered,
+	}
+	r.Register(target)
+	defer r.Unregister(target)
+
+	client, server := testPipe(t)
+	sess := NewSession(&mockTLSConn{server}, makeTestConfig(stores, r, rs))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go sess.Run(ctx)
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+	driveSCRAMSHA256(t, client, "dave", "pass")
+
+	// Give writer goroutine a moment to start
+	time.Sleep(50 * time.Millisecond)
+
+	sendStr(t, client, `<message to='eve@example.com' xmlns='jabber:client'><body>hello</body></message>`)
+
+	select {
+	case raw := <-delivered:
+		if !strings.Contains(string(raw), "hello") {
+			t.Errorf("unexpected delivery content: %s", raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("timeout waiting for routed message")
+	}
+}
+
+func TestBindIQNamespacePrecise(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "bindtest", "pass")
+	client, cancel := authenticateSession(t, stores, nil, "bindtest", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='b1' type='set'><other xmlns='something:that:contains:urn:xmpp:bind:0'/></iq>`)
+	got := readUntil(t, client, "feature-not-implemented", 3*time.Second)
+	if !strings.Contains(got, "feature-not-implemented") {
+		t.Errorf("expected feature-not-implemented for non-bind ns; got: %s", got)
+	}
+}
+
+func TestBookmarksViaPubSub(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "bookmarkuser", "pass")
+
+	ps := pubsub.New(stores.PEP, router.New(), slog.Default(), 0)
+	mods := &Modules{PubSub: ps}
+	client, cancel := authenticateSession(t, stores, mods, "bookmarkuser", "pass")
+	defer cancel()
+
+	publishIQ := `<iq id='bm1' type='set'>` +
+		`<pubsub xmlns='http://jabber.org/protocol/pubsub'>` +
+		`<publish node='urn:xmpp:bookmarks:1'>` +
+		`<item id='room@conf.example'>` +
+		`<conference xmlns='urn:xmpp:bookmarks:1' name='Cool Room' autojoin='true'/>` +
+		`</item>` +
+		`</publish>` +
+		`</pubsub>` +
+		`</iq>`
+	sendStr(t, client, publishIQ)
+	got := readUntil(t, client, `type="result"`, 3*time.Second)
+	if !strings.Contains(got, `type="result"`) {
+		t.Fatalf("expected pubsub publish result; got: %s", got)
+	}
+
+	items, err := stores.PEP.ListItems(context.Background(), "bookmarkuser@example.com", "urn:xmpp:bookmarks:1", 0)
+	if err != nil {
+		t.Fatalf("list items: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 stored bookmark, got %d", len(items))
+	}
+
+	getIQ := `<iq id='bm2' type='get'>` +
+		`<pubsub xmlns='http://jabber.org/protocol/pubsub'>` +
+		`<items node='urn:xmpp:bookmarks:1'/>` +
+		`</pubsub>` +
+		`</iq>`
+	sendStr(t, client, getIQ)
+	got2 := readUntil(t, client, "room@conf.example", 3*time.Second)
+	if !strings.Contains(got2, "room@conf.example") {
+		t.Errorf("expected bookmark item in items response; got: %s", got2)
+	}
+}
+
+// authenticateSessionWithRouter is like authenticateSession but uses the provided shared router.
+func authenticateSessionWithRouter(t *testing.T, stores *storage.Stores, mods *Modules, r *router.Router, username, password string) (net.Conn, context.CancelFunc) {
+	t.Helper()
+	rs := sm.NewStore(64)
+	cfg := SessionConfig{
+		Domain:         "example.com",
+		Stores:         stores,
+		Router:         r,
+		ResumeStore:    rs,
+		MaxStanzaBytes: 1 << 20,
+		Modules:        mods,
+	}
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	go s.Run(ctx)
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+	result := driveSCRAMSHA256(t, client, username, password)
+	if !strings.Contains(result, "<success") {
+		t.Fatalf("auth failed: %s", result)
+	}
+	time.Sleep(20 * time.Millisecond)
+	return client, cancel
+}
+
+func TestMAMArchivedOnSend(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "pass")
+
+	mamSvc := mam.New(stores.MAM, slog.Default())
+	mods := &Modules{MAM: mamSvc}
+
+	r := router.New()
+	target := &routerMockSession{
+		j:         func() stanza.JID { j, _ := stanza.Parse("bob@example.com/r1"); return j }(),
+		available: true,
+		ch:        make(chan []byte, 4),
+	}
+	r.Register(target)
+	defer r.Unregister(target)
+
+	client, cancel := authenticateSessionWithRouter(t, stores, mods, r, "alice", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<message to='bob@example.com' xmlns='jabber:client'><body>hi</body></message>`)
+	time.Sleep(100 * time.Millisecond)
+
+	archived, err := stores.MAM.Query(context.Background(), "alice@example.com", nil, nil, nil, 10)
+	if err != nil {
+		t.Fatalf("mam query: %v", err)
+	}
+	if len(archived) != 1 {
+		t.Fatalf("expected 1 archived message, got %d", len(archived))
+	}
+}
+
+func TestRosterIQGet(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "rosteruser", "pass")
+
+	rm := roster.New(stores.Roster, slog.Default())
+	ctx := context.Background()
+	owner := "rosteruser@example.com"
+	_, _ = rm.Set(ctx, owner, func() stanza.JID { j, _ := stanza.Parse("alice@example.com"); return j }(), "Alice", nil)
+	_, _ = rm.Set(ctx, owner, func() stanza.JID { j, _ := stanza.Parse("bob@example.com"); return j }(), "Bob", nil)
+
+	mods := &Modules{Roster: rm}
+	client, cancel := authenticateSession(t, stores, mods, "rosteruser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='r1' type='get'><query xmlns='jabber:iq:roster'/></iq>`)
+	got := readUntil(t, client, "</query>", 3*time.Second)
+	if !strings.Contains(got, "alice@example.com") {
+		t.Errorf("expected alice in roster response; got: %s", got)
+	}
+	if !strings.Contains(got, "bob@example.com") {
+		t.Errorf("expected bob in roster response; got: %s", got)
+	}
+}
+
+func TestPresenceSubscribeForwarded(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "pass")
+
+	rm := roster.New(stores.Roster, slog.Default())
+	mods := &Modules{Roster: rm}
+
+	r := router.New()
+	received := make(chan []byte, 4)
+	bobJID, _ := stanza.Parse("bob@example.com/r1")
+	bobSess := &routerMockSession{j: bobJID, available: true, ch: received}
+	r.Register(bobSess)
+	defer r.Unregister(bobSess)
+
+	client, cancel := authenticateSessionWithRouter(t, stores, mods, r, "alice", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<presence to='bob@example.com' type='subscribe' xmlns='jabber:client'/>`)
+
+	select {
+	case raw := <-received:
+		if !strings.Contains(string(raw), "subscribe") {
+			t.Errorf("expected subscribe presence; got: %s", raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("timeout: subscribe presence not routed")
+	}
+
+	items, _, err := stores.Roster.Get(context.Background(), "alice@example.com")
+	if err != nil {
+		t.Fatalf("roster get: %v", err)
+	}
+	found := false
+	for _, item := range items {
+		if item.Contact == "bob@example.com" && item.Ask == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected ask=subscribe in alice's roster for bob")
+	}
+}
+
+func TestCarbonsEnableThenDeliver(t *testing.T) {
+	// Tests SessionsFor + carbons fan-out at the router level using mock sessions.
+	r := router.New()
+
+	alice1JID, _ := stanza.Parse("alice@example.com/phone")
+	alice2JID, _ := stanza.Parse("alice@example.com/laptop")
+
+	ch1 := make(chan []byte, 8)
+	ch2 := make(chan []byte, 8)
+	sess1 := &routerMockSession{j: alice1JID, available: true, ch: ch1}
+	sess2 := &routerMockSession{j: alice2JID, available: true, ch: ch2}
+	r.Register(sess1)
+	r.Register(sess2)
+	defer r.Unregister(sess1)
+	defer r.Unregister(sess2)
+
+	cm := carbons.New(r, slog.Default())
+	cm.EnableForSession(alice2JID)
+
+	allRes := r.SessionsFor("alice@example.com")
+	jids := make([]stanza.JID, 0, len(allRes))
+	for _, s := range allRes {
+		jids = append(jids, s.JID())
+	}
+
+	originalMsg := []byte(`<message from='bob@example.com' to='alice@example.com/phone'><body>hello</body></message>`)
+	_ = cm.DeliverCarbons(context.Background(), alice1JID.Bare(), alice1JID, originalMsg, 0, jids)
+
+	select {
+	case raw := <-ch2:
+		if !strings.Contains(string(raw), "received") {
+			t.Errorf("expected <received> carbon on laptop; got: %s", raw)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("timeout: carbon not delivered to laptop session")
+	}
+
+	select {
+	case <-ch1:
+		t.Error("phone session should not receive a carbon copy of its own original")
+	default:
+	}
+}

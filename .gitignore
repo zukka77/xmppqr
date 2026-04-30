@@ -1,0 +1,28 @@
+/bin/
+/build/
+/dist/
+*.test
+*.out
+*.prof
+coverage.txt
+.coverprofile
+*.swp
+*~
+.idea/
+.vscode/
+.DS_Store
+.codex
+
+# root-level build outputs
+/xmppqrd
+/xmppqrctl
+/spqr-testclient
+
+# wolfSSL build artifacts if vendored locally
+/third_party/wolfssl/
+
+# local config / secrets
+.env
+.env.*
+*.local.yaml
+secrets/
