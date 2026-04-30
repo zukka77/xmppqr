@@ -32,5 +32,9 @@ func Defaults() *Config {
 			CSI:              true,
 			SPQRItemMaxBytes: 256 * 1024,
 		},
+		S2S: S2SConfig{
+			Enabled:         false,
+			DialbackEnabled: true,
+		},
 	}
 }

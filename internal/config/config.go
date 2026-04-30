@@ -16,6 +16,7 @@ type Config struct {
 	DB        DBConfig        `yaml:"db"`
 	Log       LogConfig       `yaml:"log"`
 	Modules   ModulesConfig   `yaml:"modules"`
+	S2S       S2SConfig       `yaml:"s2s"`
 }
 
 func Load(path string) (*Config, error) {

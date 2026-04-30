@@ -10,6 +10,7 @@ import "C"
 import (
 	"fmt"
 	"net"
+	"unsafe"
 )
 
 type Listener struct {
@@ -60,6 +61,30 @@ func (l *Listener) Accept() (net.Conn, error) {
 func (l *Listener) Addr() net.Addr { return l.inner.Addr() }
 
 func (l *Listener) Close() error { return l.inner.Close() }
+
+// ClientHandshake performs a wolfSSL connect on an already-established TCP
+// connection. Used by S2S STARTTLS upgrade (XEP-0220).
+func ClientHandshake(ctx *Context, tcp *net.TCPConn, serverName string) (*Conn, error) {
+	ssl := C.wolfSSL_new(ctx.ctx)
+	if ssl == nil {
+		return nil, fmt.Errorf("wolfssl: failed to create SSL object")
+	}
+	if serverName != "" {
+		cs := C.CString(serverName)
+		C.wolfSSL_UseSNI(ssl, C.uchar(C.WOLFSSL_SNI_HOST_NAME), unsafe.Pointer(cs), C.word16(len(serverName)))
+		C.free(unsafe.Pointer(cs))
+	}
+	h := registerConn(tcp)
+	setupSSLIO(ssl, h)
+	rc := C.wolfSSL_connect(ssl)
+	if rc != C.WOLFSSL_SUCCESS {
+		err := wolfErr(ssl, rc)
+		h.free()
+		C.wolfSSL_free(ssl)
+		return nil, err
+	}
+	return newConn(ssl, tcp, h), nil
+}
 
 // ServerHandshake performs a wolfSSL accept on an already-established TCP
 // connection. Used by STARTTLS upgrade flow (XEP-0220 / RFC 6120 §5).

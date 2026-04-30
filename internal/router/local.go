@@ -3,12 +3,16 @@ package router
 import (
 	"context"
 	"hash/fnv"
+	"sync"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
 )
 
 type Router struct {
-	shards [256]*shard
+	shards      [256]*shard
+	mu          sync.RWMutex
+	localDomain string
+	remote      RemoteRouter
 }
 
 func New() *Router {
@@ -36,6 +40,18 @@ func (r *Router) Unregister(s Session) {
 }
 
 func (r *Router) RouteToFull(ctx context.Context, full stanza.JID, raw []byte) error {
+	r.mu.RLock()
+	domain := r.localDomain
+	remote := r.remote
+	r.mu.RUnlock()
+
+	if domain != "" && full.Domain != domain {
+		if remote == nil {
+			return ErrNoSession
+		}
+		return remote.Send(ctx, stanza.JID{}, full.Bare(), raw)
+	}
+
 	key := full.Bare().String()
 	list := r.shardFor(key).get(key)
 	for _, s := range list {
@@ -53,6 +69,22 @@ func (r *Router) SessionsFor(bareJID string) []Session {
 }
 
 func (r *Router) RouteToBare(ctx context.Context, bare stanza.JID, raw []byte) (int, error) {
+	r.mu.RLock()
+	domain := r.localDomain
+	remote := r.remote
+	r.mu.RUnlock()
+
+	if domain != "" && bare.Domain != domain {
+		if remote == nil {
+			return 0, ErrNoSession
+		}
+		err := remote.Send(ctx, stanza.JID{}, bare, raw)
+		if err != nil {
+			return 0, err
+		}
+		return 1, nil
+	}
+
 	key := bare.String()
 	list := r.shardFor(key).get(key)
 

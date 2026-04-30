@@ -35,6 +35,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/push"
 	"github.com/danielinux/xmppqr/internal/roster"
 	"github.com/danielinux/xmppqr/internal/router"
+	"github.com/danielinux/xmppqr/internal/s2s"
 	"github.com/danielinux/xmppqr/internal/sm"
 	"github.com/danielinux/xmppqr/internal/spqr"
 	"github.com/danielinux/xmppqr/internal/stanza"
@@ -133,6 +134,19 @@ type Harness struct {
 	uploadSrv  *http.Server
 	pushRec    *recordingProvider
 	capsCache  *caps.Cache
+
+	s2sPool *s2s.Pool
+	s2sLn   *s2s.Listener
+}
+
+type HarnessOpts struct {
+	Domain string
+	EnableIBR bool
+	EnableS2S bool
+	// DialbackSecret is the shared HMAC secret for XEP-0220 dialback.
+	// If nil and EnableS2S is true, a random secret is generated.
+	// Federated peer harnesses must share the same secret to verify dialback.
+	DialbackSecret []byte
 }
 
 func NewHarness(t *testing.T) *Harness {
@@ -143,14 +157,69 @@ func NewHarnessWithIBR(t *testing.T, allowIBR bool) *Harness {
 	return newHarnessOpts(t, allowIBR)
 }
 
+// NewHarnessOpts builds a harness with full options.
+//
+// When opts.EnableS2S is true the harness:
+//   - creates an s2s.Pool with a fresh dialback secret
+//   - binds an S2S listener on 127.0.0.1:0 (use h.S2SAddr() to get the address)
+//   - wires the pool as the router's RemoteRouter via router.SetRemote
+//
+// DNS SRV lookup is bypassed per-peer via h.AddS2SPeer(domain, addr).
+// TLS is skipped for in-process tests (SetSkipTLS(true)); connections use plain TCP
+// so no certificate is needed for the S2S channel.
+func NewHarnessOpts(t *testing.T, opts HarnessOpts) *Harness {
+	t.Helper()
+	domain := opts.Domain
+	if domain == "" {
+		domain = "localhost"
+	}
+	h := newHarnessCore(t, domain, opts.EnableIBR)
+
+	if opts.EnableS2S {
+		secret := opts.DialbackSecret
+		if len(secret) == 0 {
+			var buf [32]byte
+			if _, err := wolfcrypt.Read(buf[:]); err != nil {
+				if _, err2 := rand.Read(buf[:]); err2 != nil {
+					t.Fatalf("s2s secret: %v", err2)
+				}
+			}
+			secret = buf[:]
+		}
+
+		inboundAdapter := router.NewRouterInboundAdapter(h.rt, slog.Default())
+		pool := s2s.New(domain, secret, nil, inboundAdapter, slog.Default())
+		pool.SetSkipTLS(true)
+
+		s2sLn, err := s2s.NewListener("127.0.0.1:0", pool, nil, slog.Default())
+		if err != nil {
+			t.Fatalf("s2s listener: %v", err)
+		}
+
+		h.rt.SetLocalDomain(domain)
+		h.rt.SetRemote(pool)
+
+		h.s2sPool = pool
+		h.s2sLn = s2sLn
+
+		lnCtx, lnCancel := context.WithCancel(context.Background())
+		t.Cleanup(lnCancel)
+		go func() { _ = s2sLn.Accept(lnCtx) }()
+	}
+
+	return h
+}
+
 func newHarnessOpts(t *testing.T, allowIBR bool) *Harness {
+	return newHarnessCore(t, "localhost", allowIBR)
+}
+
+func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 	t.Helper()
 
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "cert.pem")
 	keyFile := filepath.Join(dir, "key.pem")
-
-	domain := "localhost"
 
 	cmd := exec.Command("openssl", "req",
 		"-x509", "-newkey", "rsa:2048", "-nodes",
@@ -367,8 +436,29 @@ func (h *Harness) NewClientForResume(t *testing.T, username, password string) *C
 	return c
 }
 
+func (h *Harness) S2SAddr() string {
+	if h.s2sLn == nil {
+		return ""
+	}
+	return h.s2sLn.Addr()
+}
+
+// AddS2SPeer pins the s2s pool to connect to addr for domain, bypassing DNS SRV.
+// Requires EnableS2S to have been set when building the harness.
+func (h *Harness) AddS2SPeer(domain, addr string) {
+	if h.s2sPool != nil {
+		h.s2sPool.PinTarget(domain, addr)
+	}
+}
+
 func (h *Harness) Close() {
 	h.cancel()
+	if h.s2sLn != nil {
+		h.s2sLn.Close()
+	}
+	if h.s2sPool != nil {
+		h.s2sPool.Close()
+	}
 	h.tlsLn.Close()
 	h.startTLSLn.Close()
 	h.tlsCtx.Close()

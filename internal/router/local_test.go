@@ -3,10 +3,27 @@ package router
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
 )
+
+type mockRemoteRouter struct {
+	calls atomic.Int32
+	last  struct {
+		from, to stanza.JID
+		raw      []byte
+	}
+}
+
+func (m *mockRemoteRouter) Send(_ context.Context, from, to stanza.JID, raw []byte) error {
+	m.calls.Add(1)
+	m.last.from = from
+	m.last.to = to
+	m.last.raw = raw
+	return nil
+}
 
 type mockSession struct {
 	jid      stanza.JID
@@ -171,4 +188,52 @@ func mustBare(s string) stanza.JID {
 		panic(err)
 	}
 	return j.Bare()
+}
+
+func TestRouteToRemoteCallsRemoteRouter(t *testing.T) {
+	r := New()
+	r.SetLocalDomain("a.test")
+	mock := &mockRemoteRouter{}
+	r.SetRemote(mock)
+
+	to := mustBare("x@b.test")
+	_, err := r.RouteToBare(context.Background(), to, []byte("hello"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.calls.Load() != 1 {
+		t.Fatalf("expected 1 remote call, got %d", mock.calls.Load())
+	}
+}
+
+func TestRouteRemoteWithoutSetterReturnsNoSession(t *testing.T) {
+	r := New()
+	r.SetLocalDomain("a.test")
+
+	to := mustBare("x@b.test")
+	_, err := r.RouteToBare(context.Background(), to, []byte("hello"))
+	if err != ErrNoSession {
+		t.Fatalf("expected ErrNoSession, got %v", err)
+	}
+}
+
+func TestRouteLocalUnchanged(t *testing.T) {
+	r := New()
+	r.SetLocalDomain("a.test")
+	mock := &mockRemoteRouter{}
+	r.SetRemote(mock)
+
+	s := newMock("alice@a.test/phone", 0, true)
+	r.Register(s)
+
+	jid, _ := stanza.Parse("alice@a.test/phone")
+	if err := r.RouteToFull(context.Background(), jid, []byte("local")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.calls.Load() != 0 {
+		t.Fatal("remote router should not have been called for local domain")
+	}
+	if got := <-s.queue; string(got) != "local" {
+		t.Fatalf("expected 'local', got %q", got)
+	}
 }

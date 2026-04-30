@@ -38,6 +38,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/push"
 	"github.com/danielinux/xmppqr/internal/roster"
 	"github.com/danielinux/xmppqr/internal/router"
+	"github.com/danielinux/xmppqr/internal/s2s"
 	"github.com/danielinux/xmppqr/internal/sm"
 	"github.com/danielinux/xmppqr/internal/spqr"
 	"github.com/danielinux/xmppqr/internal/storage"
@@ -101,6 +102,7 @@ func main() {
 	logger.Info("seeded dev user", "jid", *devUser+"@"+cfg.Server.Domain)
 
 	rt := router.New()
+	rt.SetLocalDomain(cfg.Server.Domain)
 	resumeStore := sm.NewStore(100_000)
 
 	mods, uploadBackend := buildModules(cfg, stores, rt, logger)
@@ -110,6 +112,35 @@ func main() {
 		fatal("tls context: %v", err)
 	}
 	defer tlsCtx.Close()
+
+	var s2sPool *s2s.Pool
+	var s2sLn *s2s.Listener
+	if cfg.S2S.Enabled {
+		var s2sSecret [32]byte
+		if _, err := wolfcrypt.Read(s2sSecret[:]); err != nil {
+			if _, err2 := rand.Read(s2sSecret[:]); err2 != nil {
+				fatal("s2s secret: %v", err2)
+			}
+		}
+		s2sClientCtx, err := xtls.NewClientContext(nil, xtls.ClientOptions{
+			MinVersion:         0x0303,
+			PreferPQHybrid:     true,
+			InsecureSkipVerify: cfg.S2S.InsecureSkipVerify,
+		})
+		if err != nil {
+			fatal("s2s client tls: %v", err)
+		}
+		inboundAdapter := router.NewRouterInboundAdapter(rt, logger)
+		s2sPool = s2s.New(cfg.Server.Domain, s2sSecret[:], s2sClientCtx, inboundAdapter, logger)
+		rt.SetRemote(s2sPool)
+		if cfg.Listeners.S2S != "" {
+			s2sLn, err = s2s.NewListener(cfg.Listeners.S2S, s2sPool, tlsCtx, logger)
+			if err != nil {
+				fatal("s2s listener: %v", err)
+			}
+			logger.Info("xmppqrd s2s listening", "addr", s2sLn.Addr())
+		}
+	}
 
 	ln, err := xtls.Listen("tcp", cfg.Listeners.C2SDirectTLS, tlsCtx)
 	if err != nil {
@@ -156,12 +187,25 @@ func main() {
 	if startTLSLn != nil {
 		go acceptSTARTTLSLoop(ctx, startTLSLn, sessionCfg, tlsCtx, logger)
 	}
+	if s2sLn != nil {
+		go func() {
+			if err := s2sLn.Accept(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("s2s accept", "err", err)
+			}
+		}()
+	}
 
 	<-ctx.Done()
 	logger.Info("shutting down")
 	ln.Close()
 	if startTLSLn != nil {
 		startTLSLn.Close()
+	}
+	if s2sLn != nil {
+		s2sLn.Close()
+	}
+	if s2sPool != nil {
+		s2sPool.Close()
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
