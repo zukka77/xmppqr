@@ -21,6 +21,7 @@ const (
 	ErrItemNotFound          = "item-not-found"
 	ErrJIDMalformed          = "jid-malformed"
 	ErrNotAcceptable         = "not-acceptable"
+	ErrNotAllowed            = "not-allowed"
 	ErrNotAuthorized         = "not-authorized"
 	ErrPolicyViolation       = "policy-violation"
 	ErrServiceUnavailable    = "service-unavailable"

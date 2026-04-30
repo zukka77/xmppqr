@@ -22,10 +22,12 @@ import (
 	"github.com/danielinux/xmppqr/internal/block"
 	"github.com/danielinux/xmppqr/internal/bookmarks"
 	"github.com/danielinux/xmppqr/internal/c2s"
+	"github.com/danielinux/xmppqr/internal/caps"
 	"github.com/danielinux/xmppqr/internal/carbons"
 	"github.com/danielinux/xmppqr/internal/config"
 	"github.com/danielinux/xmppqr/internal/disco"
 	"github.com/danielinux/xmppqr/internal/httpupload"
+	"github.com/danielinux/xmppqr/internal/ibr"
 	xlog "github.com/danielinux/xmppqr/internal/log"
 	"github.com/danielinux/xmppqr/internal/mam"
 	"github.com/danielinux/xmppqr/internal/metrics"
@@ -194,7 +196,9 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 	}
 
 	rosterMgr := roster.New(stores.Roster, logger)
+	capsCache := caps.New()
 	ps := pubsub.New(stores.PEP, rt, logger, int64(cfg.Modules.SPQRItemMaxBytes))
+	ps.WithContactNotify(rosterMgr, capsCache)
 
 	uploadSvc := httpupload.New(
 		cfg.Server.Domain,
@@ -230,9 +234,11 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 		HTTPUpload: uploadSvcFull,
 		PubSub:     ps,
 		PEP:        pep.New(ps, logger),
-		MUC:        muc.New(cfg.Server.Domain, "conference."+cfg.Server.Domain, stores.MUC, rt, logger),
+		MUC:        muc.New(cfg.Server.Domain, "conference", stores.MUC, rt, logger),
 		Metrics:    metrics.New(nil),
 		SPQRPolicy: spqr.DomainPolicy{SPQROnlyMode: false},
+		Caps:       capsCache,
+		IBR:        ibr.New(stores, cfg.Server.Domain, cfg.Modules.IBR),
 	}
 	return mods, diskBackend
 }

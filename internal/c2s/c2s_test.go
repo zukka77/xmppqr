@@ -16,6 +16,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/auth"
 	"github.com/danielinux/xmppqr/internal/carbons"
 	"github.com/danielinux/xmppqr/internal/disco"
+	"github.com/danielinux/xmppqr/internal/ibr"
 	"github.com/danielinux/xmppqr/internal/mam"
 	"github.com/danielinux/xmppqr/internal/pep"
 	"github.com/danielinux/xmppqr/internal/presence"
@@ -1228,4 +1229,78 @@ func TestInitialPresenceBroadcastToContacts(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout: Alice's initial presence not broadcasted to Bob")
 	}
+}
+
+func driveIBRPreAuth(t *testing.T, client net.Conn, username, password string) string {
+	t.Helper()
+	iq := fmt.Sprintf(
+		`<iq id='reg1' type='set'><query xmlns='jabber:iq:register'><username>%s</username><password>%s</password></query></iq>`,
+		username, password,
+	)
+	sendStr(t, client, iq)
+	return readUntil(t, client, "</iq>", 3*time.Second)
+}
+
+func TestIBREnabledAndDisabled(t *testing.T) {
+	t.Run("enabled creates user", func(t *testing.T) {
+		stores := memstore.New()
+		ibrSvc := ibr.New(stores, "example.com", true)
+		mods := &Modules{IBR: ibrSvc}
+
+		client, server := testPipe(t)
+		cfg := SessionConfig{
+			Domain:         "example.com",
+			Stores:         stores,
+			Router:         router.New(),
+			ResumeStore:    sm.NewStore(64),
+			MaxStanzaBytes: 1 << 20,
+			Modules:        mods,
+		}
+		s := NewSession(&mockTLSConn{server}, cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		go s.Run(ctx)
+
+		sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+		features := readUntil(t, client, "iq-register", 3*time.Second)
+		if !strings.Contains(features, "iq-register") {
+			t.Fatalf("expected iq-register feature; got: %s", features)
+		}
+
+		result := driveIBRPreAuth(t, client, "newuser", "securepassword")
+		if !strings.Contains(result, `type='result'`) && !strings.Contains(result, `type="result"`) {
+			t.Fatalf("expected result IQ after registration; got: %s", result)
+		}
+
+		u, err := stores.Users.Get(context.Background(), "newuser")
+		if err != nil || u == nil {
+			t.Fatalf("user not created: err=%v user=%v", err, u)
+		}
+	})
+
+	t.Run("disabled returns not-allowed", func(t *testing.T) {
+		stores := memstore.New()
+		ibrSvc := ibr.New(stores, "example.com", false)
+		mods := &Modules{IBR: ibrSvc}
+
+		client, server := testPipe(t)
+		cfg := SessionConfig{
+			Domain:         "example.com",
+			Stores:         stores,
+			Router:         router.New(),
+			ResumeStore:    sm.NewStore(64),
+			MaxStanzaBytes: 1 << 20,
+			Modules:        mods,
+		}
+		s := NewSession(&mockTLSConn{server}, cfg)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		go s.Run(ctx)
+
+		sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+		features := readUntil(t, client, "</stream:features>", 3*time.Second)
+		if strings.Contains(features, "iq-register") {
+			t.Errorf("should not advertise iq-register when disabled; got: %s", features)
+		}
+	})
 }

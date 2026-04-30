@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
 )
@@ -31,13 +32,19 @@ func HandleDiscoInfo(iq *stanza.IQ, f *Features) ([]byte, error) {
 	return result.Marshal()
 }
 
-func HandleDiscoItems(iq *stanza.IQ) ([]byte, error) {
+func HandleDiscoItems(iq *stanza.IQ, items ...string) ([]byte, error) {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "<query xmlns='%s'>", nsDiscoItems)
+	for _, jid := range items {
+		fmt.Fprintf(&sb, "<item jid='%s'/>", escapeAttr(jid))
+	}
+	sb.WriteString("</query>")
 	result := &stanza.IQ{
 		ID:      iq.ID,
 		From:    iq.To,
 		To:      iq.From,
 		Type:    stanza.IQResult,
-		Payload: []byte(fmt.Sprintf("<query xmlns='%s'/>", nsDiscoItems)),
+		Payload: []byte(sb.String()),
 	}
 	return result.Marshal()
 }

@@ -3,9 +3,11 @@ package c2s
 import (
 	"github.com/danielinux/xmppqr/internal/block"
 	"github.com/danielinux/xmppqr/internal/bookmarks"
+	"github.com/danielinux/xmppqr/internal/caps"
 	"github.com/danielinux/xmppqr/internal/carbons"
 	"github.com/danielinux/xmppqr/internal/disco"
 	"github.com/danielinux/xmppqr/internal/httpupload"
+	"github.com/danielinux/xmppqr/internal/ibr"
 	"github.com/danielinux/xmppqr/internal/mam"
 	"github.com/danielinux/xmppqr/internal/metrics"
 	"github.com/danielinux/xmppqr/internal/muc"
@@ -34,4 +36,6 @@ type Modules struct {
 	MUC        *muc.Service
 	Metrics    *metrics.Metrics
 	SPQRPolicy spqr.DomainPolicy
+	Caps       *caps.Cache
+	IBR        *ibr.Service
 }

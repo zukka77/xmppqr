@@ -9,5 +9,6 @@ type ModulesConfig struct {
 	PEP              bool `yaml:"pep"`
 	SM               bool `yaml:"sm"`
 	CSI              bool `yaml:"csi"`
+	IBR              bool `yaml:"ibr"`
 	SPQRItemMaxBytes int  `yaml:"spqr_item_max_bytes"`
 }

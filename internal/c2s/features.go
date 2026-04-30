@@ -51,6 +51,10 @@ func buildFeatures(s *Session, sasl bool, bind bool) []byte {
 		b.WriteString(fmt.Sprintf(`<csi xmlns='%s'/>`, nsCSI))
 	}
 
+	if s.cfg.Modules != nil && s.cfg.Modules.IBR != nil && s.cfg.Modules.IBR.Allowed() {
+		b.WriteString(`<register xmlns='http://jabber.org/features/iq-register'/>`)
+	}
+
 	b.WriteString(`</stream:features>`)
 	return []byte(b.String())
 }

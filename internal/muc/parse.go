@@ -79,6 +79,24 @@ func extractSubject(raw []byte) (string, bool) {
 	return "", false
 }
 
+func isDiscoInfoIQ(payload []byte) bool {
+	dec := xml.NewDecoder(bytes.NewReader(payload))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if se.Name.Local == "query" && se.Name.Space == "http://jabber.org/protocol/disco#info" {
+			return true
+		}
+	}
+	return false
+}
+
 func isSelfPingIQ(payload []byte) bool {
 	dec := xml.NewDecoder(bytes.NewReader(payload))
 	for {

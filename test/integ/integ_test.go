@@ -7,9 +7,38 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
+
+func waitForStanza(t *testing.T, c *Client, deadline time.Time, match func(xml.StartElement, []byte) bool) (xml.StartElement, []byte) {
+	t.Helper()
+	for time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		timeout := remaining
+		if timeout > 500*time.Millisecond {
+			timeout = 500 * time.Millisecond
+		}
+		start, raw, err := c.NextStanzaWithTimeout(timeout)
+		if err == ErrTimeout {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read stanza: %v", err)
+		}
+		if match(start, raw) {
+			return start, raw
+		}
+	}
+	t.Fatal("timed out waiting for matching stanza")
+	return xml.StartElement{}, nil
+}
 
 func MustDial(t *testing.T, addr, domain, username, password string) *Client {
 	t.Helper()
@@ -259,4 +288,394 @@ func TestCarbonsFanout(t *testing.T) {
 		}
 	}
 	t.Fatal("timed out waiting for carbon copy at a2")
+}
+
+func TestMUCRoomCreateAndJoin(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+	h.AddUser(t, "bob", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+	b := MustDial(t, h.TLSAddr(), h.Domain, "bob", "pw")
+	defer b.Close()
+
+	room := fmt.Sprintf("chat@conference.%s", h.Domain)
+
+	joinA := fmt.Sprintf(`<presence to='%s/alice'><x xmlns='http://jabber.org/protocol/muc'/></presence>`, room)
+	if err := a.Send([]byte(joinA)); err != nil {
+		t.Fatalf("alice join: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "presence" && bytes.Contains(raw, []byte("110"))
+	})
+
+	joinB := fmt.Sprintf(`<presence to='%s/bob'><x xmlns='http://jabber.org/protocol/muc'/></presence>`, room)
+	if err := b.Send([]byte(joinB)); err != nil {
+		t.Fatalf("bob join: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	waitForStanza(t, b, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "presence" && bytes.Contains(raw, []byte("110"))
+	})
+
+	deadline = time.Now().Add(5 * time.Second)
+	waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "presence" && bytes.Contains(raw, []byte("bob"))
+	})
+}
+
+func TestMUCGroupchatBroadcast(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+	h.AddUser(t, "bob", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+	b := MustDial(t, h.TLSAddr(), h.Domain, "bob", "pw")
+	defer b.Close()
+
+	room := fmt.Sprintf("chat@conference.%s", h.Domain)
+
+	joinA := fmt.Sprintf(`<presence to='%s/alice'><x xmlns='http://jabber.org/protocol/muc'/></presence>`, room)
+	if err := a.Send([]byte(joinA)); err != nil {
+		t.Fatalf("alice join: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "presence" && bytes.Contains(raw, []byte("110"))
+	})
+
+	joinB := fmt.Sprintf(`<presence to='%s/bob'><x xmlns='http://jabber.org/protocol/muc'/></presence>`, room)
+	if err := b.Send([]byte(joinB)); err != nil {
+		t.Fatalf("bob join: %v", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	waitForStanza(t, b, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "presence" && bytes.Contains(raw, []byte("110"))
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	msg := fmt.Sprintf(`<message to='%s' type='groupchat'><body>hello</body></message>`, room)
+	if err := a.Send([]byte(msg)); err != nil {
+		t.Fatalf("alice send groupchat: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	waitForStanza(t, b, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "message" && bytes.Contains(raw, []byte("hello")) &&
+			bytes.Contains(raw, []byte("alice"))
+	})
+}
+
+func TestMUCSelfPing(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+
+	room := fmt.Sprintf("chat@conference.%s", h.Domain)
+	nick := "alice"
+
+	joinA := fmt.Sprintf(`<presence to='%s/%s'><x xmlns='http://jabber.org/protocol/muc'/></presence>`, room, nick)
+	if err := a.Send([]byte(joinA)); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "presence" && bytes.Contains(raw, []byte("110"))
+	})
+
+	pingIQ := fmt.Sprintf(`<iq id='sp1' type='get' to='%s/%s'><ping xmlns='urn:xmpp:ping'/></iq>`, room, nick)
+	if err := a.Send([]byte(pingIQ)); err != nil {
+		t.Fatalf("send self-ping: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	pingResult, _ := waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "iq"
+	})
+	requireAttr(t, pingResult, "type", "result")
+	requireAttr(t, pingResult, "id", "sp1")
+
+	a2 := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a2.Close()
+
+	pingNotIn := fmt.Sprintf(`<iq id='sp2' type='get' to='%s/ghost'><ping xmlns='urn:xmpp:ping'/></iq>`, room)
+	if err := a2.Send([]byte(pingNotIn)); err != nil {
+		t.Fatalf("send not-in-room ping: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	var errStart xml.StartElement
+	var errRaw []byte
+	errStart, errRaw = waitForStanza(t, a2, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "iq"
+	})
+	requireAttr(t, errStart, "type", "error")
+	if !bytes.Contains(errRaw, []byte("not-acceptable")) && !bytes.Contains(errRaw, []byte("item-not-found")) {
+		t.Fatalf("expected not-acceptable or item-not-found, got: %s", errRaw)
+	}
+}
+
+func TestDiscoItemsListsConference(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+
+	discoItems := fmt.Sprintf(`<iq id='di1' type='get' to='%s'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>`, h.Domain)
+	if err := a.Send([]byte(discoItems)); err != nil {
+		t.Fatalf("send disco#items: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	_, raw := waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "iq" && bytes.Contains(raw, []byte("disco#items"))
+	})
+
+	conf := fmt.Sprintf("conference.%s", h.Domain)
+	if !bytes.Contains(raw, []byte(conf)) {
+		t.Fatalf("disco#items response does not contain %q; got: %s", conf, raw)
+	}
+}
+
+func TestPEPNotifyContactReceivesEvent(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+	h.AddUser(t, "bob", "pw")
+
+	aliceBare := fmt.Sprintf("alice@%s", h.Domain)
+	bobBare := fmt.Sprintf("bob@%s", h.Domain)
+	h.AddRosterItem(t, aliceBare, bobBare, 3)
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+	b := MustDial(t, h.TLSAddr(), h.Domain, "bob", "pw")
+	defer b.Close()
+
+	if err := a.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("alice presence: %v", err)
+	}
+	if err := b.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("bob presence: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	h.Caps().PutFeatures(b.JID(), "https://example.org", "v1", []string{"urn:xmpp:foo+notify"})
+
+	pubIQ := `<iq id='pep1' type='set'><pubsub xmlns='http://jabber.org/protocol/pubsub'><publish node='urn:xmpp:foo'><item id='i1'><data/></item></publish></pubsub></iq>`
+	if err := a.Send([]byte(pubIQ)); err != nil {
+		t.Fatalf("alice publish: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		start, raw, err := b.NextStanzaWithTimeout(500 * time.Millisecond)
+		if err == ErrTimeout {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("bob read: %v", err)
+		}
+		if start.Name.Local == "message" && bytes.Contains(raw, []byte("urn:xmpp:foo")) {
+			return
+		}
+	}
+	t.Fatal("timed out waiting for PEP +notify event at bob")
+}
+
+func TestIBRRegisterThenAuth(t *testing.T) {
+	h := NewHarnessWithIBR(t, true)
+	defer h.Close()
+
+	if err := RegisterViaIBR(h.TLSAddr(), h.Domain, "newuser", "strongpassword"); err != nil {
+		t.Fatalf("IBR registration: %v", err)
+	}
+
+	c := MustDial(t, h.TLSAddr(), h.Domain, "newuser", "strongpassword")
+	defer c.Close()
+
+	if err := c.Send([]byte(`<iq id='ping1' type='get'><ping xmlns='urn:xmpp:ping'/></iq>`)); err != nil {
+		t.Fatalf("send ping: %v", err)
+	}
+
+	start, _, err := c.NextStanzaWithTimeout(5 * time.Second)
+	if err != nil {
+		t.Fatalf("read ping result: %v", err)
+	}
+	if start.Name.Local != "iq" {
+		t.Fatalf("expected <iq>, got <%s>", start.Name.Local)
+	}
+	requireAttr(t, start, "type", "result")
+	requireAttr(t, start, "id", "ping1")
+}
+
+func TestSMResumeAfterDisconnect(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	token, err := a.EnableSM(true)
+	if err != nil {
+		t.Fatalf("EnableSM: %v", err)
+	}
+	if token == "" {
+		t.Fatal("expected non-empty resume token")
+	}
+
+	a.RawDisconnect()
+	time.Sleep(100 * time.Millisecond)
+
+	a2 := h.NewClientForResume(t, "alice", "pw")
+	defer a2.Close()
+
+	if err := a2.ResumeSM(token, 0); err != nil {
+		t.Fatalf("ResumeSM: %v", err)
+	}
+}
+
+func parseSlotURLs(t *testing.T, raw []byte) (putURL, getURL string) {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(string(raw)))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch se.Name.Local {
+		case "put":
+			for _, a := range se.Attr {
+				if a.Name.Local == "url" {
+					putURL = a.Value
+				}
+			}
+		case "get":
+			for _, a := range se.Attr {
+				if a.Name.Local == "url" {
+					getURL = a.Value
+				}
+			}
+		}
+	}
+	return
+}
+
+func TestHTTPUploadRoundTrip(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+
+	req := `<iq id='u1' type='set'><request xmlns='urn:xmpp:http:upload:0' filename='hello.txt' size='5' content-type='text/plain'/></iq>`
+	if err := a.Send([]byte(req)); err != nil {
+		t.Fatalf("send slot request: %v", err)
+	}
+	start, raw, err := a.NextStanzaWithTimeout(3 * time.Second)
+	if err != nil {
+		t.Fatalf("next stanza: %v", err)
+	}
+	if start.Name.Local != "iq" {
+		t.Fatalf("expected <iq>, got <%s>", start.Name.Local)
+	}
+	requireAttr(t, start, "type", "result")
+
+	putURL, getURL := parseSlotURLs(t, raw)
+	if putURL == "" {
+		t.Fatalf("no put URL in slot response: %s", raw)
+	}
+	if getURL == "" {
+		t.Fatalf("no get URL in slot response: %s", raw)
+	}
+
+	body := []byte("hello")
+	putReq, _ := http.NewRequest(http.MethodPut, putURL, bytes.NewReader(body))
+	putResp, err := http.DefaultClient.Do(putReq)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusCreated && putResp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status: %d", putResp.StatusCode)
+	}
+
+	getResp, err := http.Get(getURL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	got, _ := io.ReadAll(getResp.Body)
+	getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status: %d", getResp.StatusCode)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("GET body: got %q, want %q", got, "hello")
+	}
+}
+
+func TestPushFiresOnCSIInactiveDelivery(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+	h.AddUser(t, "bob", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+
+	b := MustDial(t, h.TLSAddr(), h.Domain, "bob", "pw")
+	defer b.Close()
+
+	pushEnable := `<iq id='p1' type='set'><enable xmlns='urn:xmpp:push:0' jid='push@localhost' node='dev1'><x xmlns='jabber:x:data'><field var='device_token'><value>tok-bob</value></field></x></enable></iq>`
+	if err := b.Send([]byte(pushEnable)); err != nil {
+		t.Fatalf("push enable send: %v", err)
+	}
+	_, _, err := b.NextStanzaWithTimeout(2 * time.Second)
+	if err != nil {
+		t.Fatalf("push enable result: %v", err)
+	}
+
+	if err := b.Send([]byte(`<inactive xmlns='urn:xmpp:csi:0'/>`)); err != nil {
+		t.Fatalf("csi inactive: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if err := a.Send([]byte(fmt.Sprintf(
+		`<message to='%s' type='chat'><body>wake up</body></message>`,
+		b.JID().String(),
+	))); err != nil {
+		t.Fatalf("alice send: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(h.PushSends()) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	sends := h.PushSends()
+	if len(sends) == 0 {
+		t.Fatal("expected at least one push send, got none")
+	}
+	if sends[0].DeviceToken != "tok-bob" {
+		t.Fatalf("push device token: got %q, want %q", sends[0].DeviceToken, "tok-bob")
+	}
 }

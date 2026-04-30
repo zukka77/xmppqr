@@ -137,6 +137,16 @@ func (s *Service) HandleIQ(ctx context.Context, iq *stanza.IQ) ([]byte, error) {
 		return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
 	}
 
+	if iq.Type == stanza.IQGet && to.Resource == "" && to.Local == "" && isDiscoInfoIQ(iq.Payload) {
+		payload := []byte(`<query xmlns='http://jabber.org/protocol/disco#info'>` +
+			`<identity category='conference' type='text' name='MUC'/>` +
+			`<feature var='http://jabber.org/protocol/muc'/>` +
+			`<feature var='http://jabber.org/protocol/disco#info'/>` +
+			`<feature var='http://jabber.org/protocol/disco#items'/>` +
+			`</query>`)
+		return marshalResultIQ(iq, payload), nil
+	}
+
 	if iq.Type == stanza.IQGet && to.Resource != "" && isSelfPingIQ(iq.Payload) {
 		room := s.getRoom(to)
 		from, ferr := stanza.Parse(iq.From)

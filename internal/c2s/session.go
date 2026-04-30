@@ -88,6 +88,18 @@ func (s *Session) Deliver(ctx context.Context, raw []byte) error {
 		}
 	}
 
+	if mods != nil && mods.Caps != nil && info.Kind == csi.KindPresence && info.FromJID != "" {
+		fromJID, perr := stanza.Parse(info.FromJID)
+		if perr == nil && !fromJID.IsBare() {
+			presType := extractAttr(raw, "type")
+			if presType == stanza.PresenceUnavailable {
+				mods.Caps.Forget(fromJID)
+			} else if presType == "" || presType == "available" {
+				_ = mods.Caps.RecordPresence(fromJID, raw)
+			}
+		}
+	}
+
 	deliver, hold := s.csiF.ShouldDeliver(info)
 	if hold {
 		from := ""

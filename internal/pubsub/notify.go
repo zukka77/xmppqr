@@ -47,10 +47,44 @@ func (svc *Service) notify(ctx context.Context, owner stanza.JID, node, itemID s
 		svc.logger.Error("pubsub notify marshal", "err", err)
 		return
 	}
-	// XEP-0163 §4 requires also notifying contacts with subscription from/both that
-	// advertise the node's +notify cap. That contact fan-out is not yet implemented;
-	// only the owner's own bound resources receive the event.
+
 	if _, err := svc.router.RouteToBare(ctx, owner.Bare(), raw); err != nil {
 		svc.logger.Debug("pubsub notify route", "owner", owner, "err", err)
+	}
+
+	if !svc.contactNotifyEnabled() {
+		return
+	}
+
+	roster, _, err := svc.roster.Get(ctx, owner.Bare().String())
+	if err != nil {
+		svc.logger.Debug("pubsub notify roster get", "owner", owner, "err", err)
+		return
+	}
+
+	notifyFeature := node + "+notify"
+	for _, item := range roster {
+		if item.Subscription != 1 && item.Subscription != 3 {
+			continue
+		}
+		contactBare, err := stanza.Parse(item.Contact)
+		if err != nil {
+			continue
+		}
+		for _, fullJID := range svc.caps.BareJIDsWithFeatureMatching(contactBare, notifyFeature) {
+			contactMsg := &stanza.Message{
+				From:     owner.String(),
+				To:       fullJID.String(),
+				Type:     stanza.MessageHeadline,
+				Children: buf.Bytes(),
+			}
+			contactRaw, merr := contactMsg.Marshal()
+			if merr != nil {
+				continue
+			}
+			if rerr := svc.router.RouteToFull(ctx, fullJID, contactRaw); rerr != nil {
+				svc.logger.Debug("pubsub notify contact route", "contact", fullJID, "err", rerr)
+			}
+		}
 	}
 }

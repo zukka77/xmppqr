@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielinux/xmppqr/internal/caps"
 	"github.com/danielinux/xmppqr/internal/router"
 	"github.com/danielinux/xmppqr/internal/stanza"
+	"github.com/danielinux/xmppqr/internal/storage"
 	"github.com/danielinux/xmppqr/internal/storage/memstore"
 )
 
@@ -260,6 +262,130 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+type stubRoster struct {
+	items []*storage.RosterItem
+}
+
+func (s *stubRoster) Get(_ context.Context, _ string) ([]*storage.RosterItem, int64, error) {
+	return s.items, 0, nil
+}
+
+func TestNotifyContactWithPlusNotify(t *testing.T) {
+	stores := memstore.New()
+	r := router.New()
+
+	aliceJID, _ := stanza.Parse("alice@example.com/res")
+	aliceSess := &mockSession{jid: aliceJID}
+	r.Register(aliceSess)
+
+	bobJID, _ := stanza.Parse("bob@example.com/laptop")
+	bobSess := &mockSession{jid: bobJID}
+	r.Register(bobSess)
+
+	svc := New(stores.PEP, r, slog.Default(), 1024)
+
+	roster := &stubRoster{items: []*storage.RosterItem{
+		{Owner: "alice@example.com", Contact: "bob@example.com", Subscription: 3},
+	}}
+	capsCache := caps.New()
+	capsCache.PutFeatures(bobJID, "n", "v", []string{"urn:xmpp:foo+notify"})
+	svc.WithContactNotify(roster, capsCache)
+
+	ctx := context.Background()
+	owner, _ := stanza.Parse("alice@example.com/res")
+	pubIQ := buildPublishIQ("urn:xmpp:foo", []rawItem{{ID: "i1", Payload: []byte("<d/>")}})
+	if _, err := svc.HandleIQ(ctx, owner, pubIQ); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(bobSess.deliveries()) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if len(bobSess.deliveries()) == 0 {
+		t.Fatal("bob should have received a +notify event but got none")
+	}
+	if !bytes.Contains(bobSess.deliveries()[0], []byte("urn:xmpp:foo")) {
+		t.Errorf("bob notification missing node: %s", bobSess.deliveries()[0])
+	}
+}
+
+func TestNotifyContactWithoutPlusNotify(t *testing.T) {
+	stores := memstore.New()
+	r := router.New()
+
+	aliceJID, _ := stanza.Parse("alice@example.com/res")
+	aliceSess := &mockSession{jid: aliceJID}
+	r.Register(aliceSess)
+
+	bobJID, _ := stanza.Parse("bob@example.com/laptop")
+	bobSess := &mockSession{jid: bobJID}
+	r.Register(bobSess)
+
+	svc := New(stores.PEP, r, slog.Default(), 1024)
+
+	roster := &stubRoster{items: []*storage.RosterItem{
+		{Owner: "alice@example.com", Contact: "bob@example.com", Subscription: 3},
+	}}
+	capsCache := caps.New()
+	capsCache.PutFeatures(bobJID, "n", "v", []string{"urn:xmpp:bar"})
+	svc.WithContactNotify(roster, capsCache)
+
+	ctx := context.Background()
+	owner, _ := stanza.Parse("alice@example.com/res")
+	pubIQ := buildPublishIQ("urn:xmpp:foo", []rawItem{{ID: "i1", Payload: []byte("<d/>")}})
+	if _, err := svc.HandleIQ(ctx, owner, pubIQ); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	if len(bobSess.deliveries()) > 0 {
+		t.Fatalf("bob should NOT have received a +notify event but got: %s", bobSess.deliveries()[0])
+	}
+}
+
+func TestNotifyOnlyOwnerWhenNoCapsConfigured(t *testing.T) {
+	stores := memstore.New()
+	r := router.New()
+
+	aliceJID, _ := stanza.Parse("alice@example.com/res")
+	aliceSess := &mockSession{jid: aliceJID}
+	r.Register(aliceSess)
+
+	bobJID, _ := stanza.Parse("bob@example.com/laptop")
+	bobSess := &mockSession{jid: bobJID}
+	r.Register(bobSess)
+
+	svc := New(stores.PEP, r, slog.Default(), 1024)
+
+	ctx := context.Background()
+	owner, _ := stanza.Parse("alice@example.com/res")
+	pubIQ := buildPublishIQ("urn:xmpp:foo", []rawItem{{ID: "i1", Payload: []byte("<d/>")}})
+	if _, err := svc.HandleIQ(ctx, owner, pubIQ); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(aliceSess.deliveries()) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if len(aliceSess.deliveries()) == 0 {
+		t.Fatal("alice should have received her own event")
+	}
+	if len(bobSess.deliveries()) > 0 {
+		t.Fatal("bob should NOT receive events when caps not configured")
+	}
 }
 
 func TestNotifyDispatched(t *testing.T) {

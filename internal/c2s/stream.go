@@ -93,6 +93,8 @@ func newStreamID() string {
 	return hex.EncodeToString(b)
 }
 
+const nsIQRegister = "jabber:iq:register"
+
 func authLoop(ctx context.Context, s *Session) (*authResult, error) {
 	for {
 		start, raw, err := s.dec.NextElement()
@@ -110,6 +112,18 @@ func authLoop(ctx context.Context, s *Session) (*authResult, error) {
 			}
 			s.log.Info("pre-auth mechanism", "element", "auth", "ns", start.Name.Space, "mechanism", authMechanism(start))
 			return handleLegacyAuth(ctx, s, start, raw)
+		case "iq":
+			mods := s.cfg.Modules
+			if mods == nil || mods.IBR == nil || !mods.IBR.Allowed() {
+				s.log.Warn("pre-auth: IQ without IBR enabled")
+				continue
+			}
+			iq, iqErr := stanza.ParseIQ(start, raw)
+			if iqErr == nil && firstChildNS(iq.Payload) == nsIQRegister {
+				resp, herr := mods.IBR.HandleIQ(ctx, iq)
+				writeIQResponse(s, iq, resp, herr)
+				continue
+			}
 		default:
 			s.log.Warn("pre-auth: unexpected element", "local", start.Name.Local, "ns", start.Name.Space)
 		}
@@ -298,6 +312,22 @@ func handleStanza(ctx context.Context, s *Session, start xml.StartElement, raw [
 func handleOutboundMessage(ctx context.Context, s *Session, start xml.StartElement, raw []byte, j stanza.JID) error {
 	mods := s.cfg.Modules
 
+	if mods != nil && mods.MUC != nil && mods.MUC.IsOurDomain(j) {
+		msgType := ""
+		for _, a := range start.Attr {
+			if a.Name.Local == "type" {
+				msgType = a.Value
+				break
+			}
+		}
+		if msgType == stanza.MessageGroupchat || msgType == "" || j.Domain == mods.MUC.Domain() {
+			from := s.jid
+			_ = mods.MUC.HandleStanza(ctx, raw, "message", from, j)
+			atomic.AddUint32(&s.smInH, 1)
+			return nil
+		}
+	}
+
 	if mods != nil && mods.SPQRPolicy.SPQROnlyMode {
 		if err := spqr.EnforceMessagePolicy(raw, mods.SPQRPolicy); err != nil {
 			errMsg := fmt.Sprintf(
@@ -349,6 +379,15 @@ func handlePresence(ctx context.Context, s *Session, start xml.StartElement, raw
 		}
 	}
 
+	mods := s.cfg.Modules
+
+	if mods != nil && mods.MUC != nil && mods.MUC.IsOurDomain(j) {
+		from := s.jid
+		_ = mods.MUC.HandleStanza(ctx, raw, "presence", from, j)
+		atomic.AddUint32(&s.smInH, 1)
+		return nil
+	}
+
 	avail := presType == "" || presType == "available"
 	if avail {
 		atomic.StoreInt32(&s.avail, 1)
@@ -356,8 +395,6 @@ func handlePresence(ctx context.Context, s *Session, start xml.StartElement, raw
 		atomic.StoreInt32(&s.avail, 0)
 	}
 	atomic.StoreInt32(&s.priority, 0)
-
-	mods := s.cfg.Modules
 
 	switch presType {
 	case stanza.PresenceSubscribe:
@@ -449,6 +486,9 @@ func handleBarePresence(ctx context.Context, s *Session, start xml.StartElement,
 	switch presType {
 	case "", "available":
 		atomic.StoreInt32(&s.avail, 1)
+		if mods != nil && mods.Caps != nil {
+			_ = mods.Caps.RecordPresence(s.jid, raw)
+		}
 		if mods != nil && mods.Presence != nil {
 			if !s.initialPresenceSent {
 				s.initialPresenceSent = true
@@ -459,6 +499,9 @@ func handleBarePresence(ctx context.Context, s *Session, start xml.StartElement,
 		}
 	case stanza.PresenceUnavailable:
 		atomic.StoreInt32(&s.avail, 0)
+		if mods != nil && mods.Caps != nil {
+			mods.Caps.Forget(s.jid)
+		}
 		if mods != nil && mods.Presence != nil {
 			_ = mods.Presence.OnUnavailablePresence(ctx, s, raw)
 		}
@@ -491,6 +534,9 @@ func handleIQ(ctx context.Context, s *Session, start xml.StartElement, raw []byt
 			isLocal := j.Domain == s.cfg.Domain || j.Domain == ""
 			isMUCDomain := s.cfg.Modules != nil && s.cfg.Modules.MUC != nil && s.cfg.Modules.MUC.IsOurDomain(j)
 			if isMUCDomain {
+				if iq.From == "" {
+					iq.From = s.jid.String()
+				}
 				respBytes, herr := s.cfg.Modules.MUC.HandleIQ(ctx, iq)
 				writeIQResponse(s, iq, respBytes, herr)
 				atomic.AddUint32(&s.smInH, 1)
@@ -543,7 +589,11 @@ func dispatchLocalIQ(ctx context.Context, s *Session, iq *stanza.IQ) ([]byte, er
 			return disco.HandleDiscoInfo(iq, mods.Disco)
 		}
 	case "http://jabber.org/protocol/disco#items":
-		return disco.HandleDiscoItems(iq)
+		var discoItems []string
+		if mods != nil && mods.MUC != nil {
+			discoItems = append(discoItems, mods.MUC.Domain())
+		}
+		return disco.HandleDiscoItems(iq, discoItems...)
 	case "vcard-temp":
 		if mods != nil && mods.VCard != nil {
 			raw, err := mods.VCard.HandleIQ(ctx, iq)
@@ -586,6 +636,22 @@ func dispatchLocalIQ(ctx context.Context, s *Session, iq *stanza.IQ) ([]byte, er
 		}
 	case "urn:xmpp:push:0":
 		if mods != nil && mods.Push != nil {
+			if iq.Type == stanza.IQSet {
+				local := firstChildLocal(iq.Payload)
+				if local == "enable" {
+					svcJIDStr, node, formXML := parsePushEnable(iq.Payload)
+					svcJID, jerr := stanza.Parse(svcJIDStr)
+					if jerr == nil {
+						_ = mods.Push.Enable(ctx, s.jid, svcJID, node, formXML)
+					}
+				} else if local == "disable" {
+					svcJIDStr, node, _ := parsePushEnable(iq.Payload)
+					svcJID, jerr := stanza.Parse(svcJIDStr)
+					if jerr == nil {
+						_ = mods.Push.Disable(ctx, s.jid, svcJID, node)
+					}
+				}
+			}
 			result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult}
 			return result.Marshal()
 		}
@@ -751,6 +817,57 @@ func handleCarbonsIQ(s *Session, iq *stanza.IQ) ([]byte, error) {
 	}
 	result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult}
 	return result.Marshal()
+}
+
+func parsePushEnable(payload []byte) (svcJID, node string, formXML []byte) {
+	dec := xml.NewDecoder(bytes.NewReader(payload))
+	depth := 0
+	var formBuf bytes.Buffer
+	formEnc := xml.NewEncoder(&formBuf)
+	inForm := false
+	for {
+		tok, err := dec.RawToken()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+			if depth == 1 {
+				for _, a := range t.Attr {
+					switch a.Name.Local {
+					case "jid":
+						svcJID = a.Value
+					case "node":
+						node = a.Value
+					}
+				}
+			}
+			if t.Name.Space == "jabber:x:data" || (t.Name.Local == "x" && depth == 2) {
+				inForm = true
+			}
+			if inForm {
+				formEnc.EncodeToken(t)
+			}
+		case xml.EndElement:
+			if inForm {
+				formEnc.EncodeToken(t)
+			}
+			depth--
+			if depth == 1 {
+				inForm = false
+			}
+		case xml.CharData:
+			if inForm {
+				formEnc.EncodeToken(t)
+			}
+		}
+	}
+	formEnc.Flush()
+	if formBuf.Len() > 0 {
+		formXML = formBuf.Bytes()
+	}
+	return
 }
 
 func firstChildNS(payload []byte) string {
