@@ -47,6 +47,9 @@ func (svc *Service) notify(ctx context.Context, owner stanza.JID, node, itemID s
 		svc.logger.Error("pubsub notify marshal", "err", err)
 		return
 	}
+	// XEP-0163 §4 requires also notifying contacts with subscription from/both that
+	// advertise the node's +notify cap. That contact fan-out is not yet implemented;
+	// only the owner's own bound resources receive the event.
 	if _, err := svc.router.RouteToBare(ctx, owner.Bare(), raw); err != nil {
 		svc.logger.Debug("pubsub notify route", "owner", owner, "err", err)
 	}

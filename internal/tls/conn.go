@@ -8,15 +8,28 @@ package tls
 */
 import "C"
 import (
+	"errors"
+	"io"
 	"net"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
 
+var ErrClosed = errors.New("wolfssl: connection closed")
+
+// Conn implements net.Conn around a WOLFSSL session. wolfSSL allows one
+// reader and one writer concurrently on the same SSL object, but Close must
+// not race with either. We separate rmu/wmu so reader and writer goroutines
+// don't block each other; Close acquires both before freeing the SSL.
 type Conn struct {
+	rmu    sync.Mutex
+	wmu    sync.Mutex
 	ssl    *C.WOLFSSL
 	tcp    *net.TCPConn
 	handle *connHandle
+	closed atomic.Bool
 }
 
 func newConn(ssl *C.WOLFSSL, tcp *net.TCPConn, h *connHandle) *Conn {
@@ -26,6 +39,11 @@ func newConn(ssl *C.WOLFSSL, tcp *net.TCPConn, h *connHandle) *Conn {
 func (c *Conn) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+	c.rmu.Lock()
+	defer c.rmu.Unlock()
+	if c.closed.Load() {
+		return 0, io.EOF
 	}
 	n := C.wolfSSL_read(c.ssl, unsafe.Pointer(&p[0]), C.int(len(p)))
 	if n > 0 {
@@ -42,6 +60,11 @@ func (c *Conn) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if c.closed.Load() {
+		return 0, ErrClosed
+	}
 	n := C.wolfSSL_write(c.ssl, unsafe.Pointer(&p[0]), C.int(len(p)))
 	if n > 0 {
 		return int(n), nil
@@ -54,16 +77,32 @@ func (c *Conn) Write(p []byte) (int, error) {
 }
 
 func (c *Conn) Close() error {
+	if !c.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	// Close TCP first — this causes any blocked in-flight wolfSSL_read/_write
+	// (which call our IO callbacks → c.tcp.Read/Write) to return with an error,
+	// letting the reader/writer goroutines drop their mutexes.
+	tcpErr := c.tcp.Close()
+
+	// Now drain — wait for any in-flight reader/writer to release the mutex
+	// before we free the SSL. After this point no goroutine can re-enter
+	// because closed.Load() returns true at the top of Read/Write.
+	c.rmu.Lock()
+	c.rmu.Unlock()
+	c.wmu.Lock()
+	c.wmu.Unlock()
+
 	if c.ssl != nil {
 		C.wolfSSL_shutdown(c.ssl)
 		C.wolfSSL_free(c.ssl)
 		c.ssl = nil
-		if c.handle != nil {
-			c.handle.free()
-			c.handle = nil
-		}
 	}
-	return c.tcp.Close()
+	if c.handle != nil {
+		c.handle.free()
+		c.handle = nil
+	}
+	return tcpErr
 }
 
 func (c *Conn) LocalAddr() net.Addr  { return c.tcp.LocalAddr() }

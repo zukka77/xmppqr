@@ -44,6 +44,8 @@ type Session struct {
 	smInH    uint32 // atomic: SM inbound stanza counter (per-session, per XEP-0198)
 	csiF     *csi.Filter
 
+	initialPresenceSent bool
+
 	// shutdown signal
 	done chan struct{}
 }
@@ -78,6 +80,14 @@ func (s *Session) IsAvailable() bool { return atomic.LoadInt32(&s.avail) == 1 }
 
 func (s *Session) Deliver(ctx context.Context, raw []byte) error {
 	info := stanzaInfo(raw)
+
+	mods := s.cfg.Modules
+	if mods != nil && info.Kind == csi.KindPresence && mods.Roster != nil {
+		if drop := s.handleInboundSubscription(ctx, raw, mods); drop {
+			return nil
+		}
+	}
+
 	deliver, hold := s.csiF.ShouldDeliver(info)
 	if hold {
 		from := ""
@@ -90,8 +100,6 @@ func (s *Session) Deliver(ctx context.Context, raw []byte) error {
 	if !deliver {
 		return nil
 	}
-
-	mods := s.cfg.Modules
 	if mods != nil && info.Kind == csi.KindMessage {
 		ownerBare := s.jid.Bare().String()
 
@@ -104,7 +112,10 @@ func (s *Session) Deliver(ctx context.Context, raw []byte) error {
 			}
 		}
 
-		if mods.Carbons != nil && s.cfg.Router != nil {
+		// Skip carbon fan-out if this stanza is already a carbon copy — XEP-0280
+		// §11 forbids re-carboning to prevent ping-pong between resources.
+		alreadyCarbon := bytes.Contains(raw, []byte("urn:xmpp:carbons:2"))
+		if !alreadyCarbon && mods.Carbons != nil && s.cfg.Router != nil {
 			allRes := s.cfg.Router.SessionsFor(ownerBare)
 			jids := make([]stanza.JID, 0, len(allRes))
 			for _, sess := range allRes {

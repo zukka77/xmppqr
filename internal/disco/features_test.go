@@ -63,6 +63,28 @@ func TestMarshalDiscoInfoRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDefaultServerHasLegacyFeatures(t *testing.T) {
+	f := DefaultServer()
+	required := []string{
+		"urn:ietf:params:xml:ns:xmpp-session",
+		"jabber:iq:version",
+		"jabber:iq:last",
+		"urn:xmpp:time",
+	}
+	for _, ns := range required {
+		found := false
+		for _, v := range f.Vars {
+			if v == ns {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing feature: %s", ns)
+		}
+	}
+}
+
 func TestMarshalDiscoInfoWithNode(t *testing.T) {
 	f := DefaultServer()
 	raw := f.MarshalDiscoInfo("http://example.com#test")

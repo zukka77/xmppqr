@@ -17,6 +17,8 @@ import (
 	"github.com/danielinux/xmppqr/internal/carbons"
 	"github.com/danielinux/xmppqr/internal/disco"
 	"github.com/danielinux/xmppqr/internal/mam"
+	"github.com/danielinux/xmppqr/internal/pep"
+	"github.com/danielinux/xmppqr/internal/presence"
 	"github.com/danielinux/xmppqr/internal/pubsub"
 	"github.com/danielinux/xmppqr/internal/roster"
 	"github.com/danielinux/xmppqr/internal/router"
@@ -852,5 +854,378 @@ func TestCarbonsEnableThenDeliver(t *testing.T) {
 	case <-ch1:
 		t.Error("phone session should not receive a carbon copy of its own original")
 	default:
+	}
+}
+
+func TestPEPPublishFromAuthenticatedSession(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "pepuser", "pass")
+
+	r := router.New()
+	ps := pubsub.New(stores.PEP, r, slog.Default(), 0)
+	pepSvc := pep.New(ps, slog.Default())
+	mods := &Modules{PEP: pepSvc, PubSub: ps}
+
+	client, cancel := authenticateSessionWithRouter(t, stores, mods, r, "pepuser", "pass")
+	defer cancel()
+
+	publishIQ := `<iq id='omemo1' type='set'>` +
+		`<pubsub xmlns='http://jabber.org/protocol/pubsub'>` +
+		`<publish node='eu.siacs.conversations.axolotl.devicelist'>` +
+		`<item id='current'>` +
+		`<list xmlns='eu.siacs.conversations.axolotl'><device id='1234567'/></list>` +
+		`</item>` +
+		`</publish>` +
+		`</pubsub>` +
+		`</iq>`
+	sendStr(t, client, publishIQ)
+	got := readUntil(t, client, `type="result"`, 3*time.Second)
+	if !strings.Contains(got, `type="result"`) {
+		t.Fatalf("expected publish result; got: %s", got)
+	}
+
+	fetchIQ := `<iq id='omemo2' type='get'>` +
+		`<pubsub xmlns='http://jabber.org/protocol/pubsub'>` +
+		`<items node='eu.siacs.conversations.axolotl.devicelist' max_items='1'/>` +
+		`</pubsub>` +
+		`</iq>`
+	sendStr(t, client, fetchIQ)
+	got2 := readUntil(t, client, "1234567", 3*time.Second)
+	if !strings.Contains(got2, "1234567") {
+		t.Fatalf("expected device id in fetch response; got: %s", got2)
+	}
+}
+
+func TestLegacySessionIQ(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "sessuser", "pass")
+	client, cancel := authenticateSession(t, stores, nil, "sessuser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='sess1' type='set'><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></iq>`)
+	got := readUntil(t, client, "result", 3*time.Second)
+	if !strings.Contains(got, "sess1") || !strings.Contains(got, "result") {
+		t.Errorf("expected empty result for session IQ; got: %s", got)
+	}
+	if strings.Contains(got, "error") {
+		t.Errorf("unexpected error in session IQ response; got: %s", got)
+	}
+}
+
+func TestVersionIQ(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "veruser", "pass")
+	client, cancel := authenticateSession(t, stores, nil, "veruser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='ver1' type='get'><query xmlns='jabber:iq:version'/></iq>`)
+	got := readUntil(t, client, "</query>", 3*time.Second)
+	if !strings.Contains(got, "xmppqr") {
+		t.Errorf("expected name in version response; got: %s", got)
+	}
+	if !strings.Contains(got, "<version>") {
+		t.Errorf("expected version element; got: %s", got)
+	}
+	if !strings.Contains(got, "<os>") {
+		t.Errorf("expected os element; got: %s", got)
+	}
+}
+
+func TestEntityTimeIQ(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "timeuser", "pass")
+	client, cancel := authenticateSession(t, stores, nil, "timeuser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='time1' type='get'><time xmlns='urn:xmpp:time'/></iq>`)
+	got := readUntil(t, client, "</time>", 3*time.Second)
+	if !strings.Contains(got, "<tzo>") {
+		t.Errorf("expected tzo element; got: %s", got)
+	}
+	if !strings.Contains(got, "<utc>") {
+		t.Errorf("expected utc element; got: %s", got)
+	}
+	if !strings.Contains(got, "+00:00") {
+		t.Errorf("expected +00:00 tzo; got: %s", got)
+	}
+}
+
+func TestLastActivityIQ(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "lastuser", "pass")
+	client, cancel := authenticateSession(t, stores, nil, "lastuser", "pass")
+	defer cancel()
+
+	sendStr(t, client, `<iq id='last1' type='get'><query xmlns='jabber:iq:last'/></iq>`)
+	got := readUntil(t, client, "seconds=", 3*time.Second)
+	if !strings.Contains(got, "seconds=") {
+		t.Errorf("expected seconds attribute; got: %s", got)
+	}
+	if strings.Contains(got, "seconds='-") {
+		t.Errorf("expected non-negative seconds; got: %s", got)
+	}
+}
+
+func TestPEPNotifyOwnerResources(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "notifyuser", "pass")
+
+	r := router.New()
+	ps := pubsub.New(stores.PEP, r, slog.Default(), 0)
+	pepSvc := pep.New(ps, slog.Default())
+	mods := &Modules{PEP: pepSvc, PubSub: ps}
+
+	client1, cancel1 := authenticateSessionWithRouter(t, stores, mods, r, "notifyuser", "pass")
+	defer cancel1()
+
+	notifyCh := make(chan []byte, 8)
+	res2JID, _ := stanza.Parse("notifyuser@example.com/res2")
+	mockSess := &routerMockSession{j: res2JID, available: true, ch: notifyCh}
+	r.Register(mockSess)
+	defer r.Unregister(mockSess)
+
+	publishIQ := `<iq id='omemo3' type='set'>` +
+		`<pubsub xmlns='http://jabber.org/protocol/pubsub'>` +
+		`<publish node='eu.siacs.conversations.axolotl.devicelist'>` +
+		`<item id='current'>` +
+		`<list xmlns='eu.siacs.conversations.axolotl'><device id='9999'/></list>` +
+		`</item>` +
+		`</publish>` +
+		`</pubsub>` +
+		`</iq>`
+	sendStr(t, client1, publishIQ)
+	readUntil(t, client1, `type="result"`, 3*time.Second)
+
+	select {
+	case raw := <-notifyCh:
+		if !strings.Contains(string(raw), "9999") {
+			t.Errorf("notify to second resource missing device id; got: %s", raw)
+		}
+		if !strings.Contains(string(raw), "event") {
+			t.Errorf("notify missing event element; got: %s", raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("timeout: notify not delivered to second resource")
+	}
+}
+
+func TestSubscribeFlow(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "pass")
+
+	rm := roster.New(stores.Roster, slog.Default())
+	mods := &Modules{Roster: rm}
+
+	r := router.New()
+
+	bobReceived := make(chan []byte, 4)
+	aliceOtherReceived := make(chan []byte, 8)
+
+	bobJID, _ := stanza.Parse("bob@example.com/r1")
+	bobSess := &routerMockSession{j: bobJID, available: true, ch: bobReceived}
+	r.Register(bobSess)
+	defer r.Unregister(bobSess)
+
+	client, cancel := authenticateSessionWithRouter(t, stores, mods, r, "alice", "pass")
+	defer cancel()
+	time.Sleep(30 * time.Millisecond)
+
+	// Register a second Alice resource to receive roster push.
+	aliceOtherJID, _ := stanza.Parse("alice@example.com/phone")
+	aliceOther := &routerMockSession{j: aliceOtherJID, available: true, ch: aliceOtherReceived}
+	r.Register(aliceOther)
+	defer r.Unregister(aliceOther)
+
+	sendStr(t, client, `<presence to='bob@example.com' type='subscribe' xmlns='jabber:client'/>`)
+
+	select {
+	case raw := <-bobReceived:
+		if !strings.Contains(string(raw), "subscribe") {
+			t.Errorf("expected subscribe presence at Bob; got: %s", raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout: subscribe not routed to Bob")
+	}
+
+	select {
+	case raw := <-aliceOtherReceived:
+		if !strings.Contains(string(raw), "jabber:iq:roster") {
+			t.Errorf("expected roster push at Alice's second resource; got: %s", raw)
+		}
+		if !strings.Contains(string(raw), "bob@example.com") {
+			t.Errorf("roster push missing Bob's JID; got: %s", raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout: roster push not delivered to Alice's second resource")
+	}
+
+	items, _, err := stores.Roster.Get(context.Background(), "alice@example.com")
+	if err != nil {
+		t.Fatalf("roster get: %v", err)
+	}
+	found := false
+	for _, item := range items {
+		if item.Contact == "bob@example.com" && item.Ask == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected ask=subscribe in Alice's roster for Bob")
+	}
+}
+
+func TestSubscribedReturnsCurrentPresence(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "pass")
+
+	rm := roster.New(stores.Roster, slog.Default())
+	ctx := context.Background()
+	// Pre-create a pending subscription entry (Alice subscribed to Bob, Bob has not approved yet).
+	_, _ = stores.Roster.Put(ctx, &storage.RosterItem{
+		Owner:        "alice@example.com",
+		Contact:      "bob@example.com",
+		Subscription: 0,
+		Ask:          1,
+	})
+
+	mods := &Modules{Roster: rm}
+	r := router.New()
+
+	bobReceived := make(chan []byte, 8)
+	bobJID, _ := stanza.Parse("bob@example.com/r1")
+	bobSess := &routerMockSession{j: bobJID, available: true, ch: bobReceived}
+	r.Register(bobSess)
+	defer r.Unregister(bobSess)
+
+	client, cancel := authenticateSessionWithRouter(t, stores, mods, r, "alice", "pass")
+	defer cancel()
+	time.Sleep(30 * time.Millisecond)
+
+	// Make Alice available so currentAvailablePresence() can find her session.
+	sendStr(t, client, `<presence xmlns='jabber:client'/>`)
+	time.Sleep(30 * time.Millisecond)
+	// Drain any presence broadcast that might have gone to Bob (none expected since Bob's
+	// subscription is 'none' at this point, but drain anyway).
+	for len(bobReceived) > 0 {
+		<-bobReceived
+	}
+
+	// Alice sends subscribed to Bob — she is approving Bob's inbound subscribe.
+	sendStr(t, client, `<presence to='bob@example.com' type='subscribed' xmlns='jabber:client'/>`)
+
+	// Expect the 'subscribed' stanza itself.
+	gotSubscribed := false
+	gotPresence := false
+	deadline := time.After(3 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case raw := <-bobReceived:
+			s := string(raw)
+			if strings.Contains(s, "subscribed") {
+				gotSubscribed = true
+			}
+			if !strings.Contains(s, "subscribed") && !strings.Contains(s, "unsubscribed") {
+				gotPresence = true
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for stanzas at Bob")
+		}
+	}
+	if !gotSubscribed {
+		t.Error("Bob did not receive 'subscribed' presence")
+	}
+	if !gotPresence {
+		t.Error("Bob did not receive Alice's current available presence")
+	}
+}
+
+func TestUnsubscribeUpdatesRoster(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "pass")
+
+	rm := roster.New(stores.Roster, slog.Default())
+	ctx := context.Background()
+	// Start from both: Alice is subscribed to Bob and Bob to Alice.
+	_, _ = stores.Roster.Put(ctx, &storage.RosterItem{
+		Owner:        "alice@example.com",
+		Contact:      "bob@example.com",
+		Subscription: 3, // both
+		Ask:          0,
+	})
+
+	mods := &Modules{Roster: rm}
+	r := router.New()
+
+	bobReceived := make(chan []byte, 4)
+	bobJID, _ := stanza.Parse("bob@example.com/r1")
+	bobSess := &routerMockSession{j: bobJID, available: true, ch: bobReceived}
+	r.Register(bobSess)
+	defer r.Unregister(bobSess)
+
+	client, cancel := authenticateSessionWithRouter(t, stores, mods, r, "alice", "pass")
+	defer cancel()
+	time.Sleep(30 * time.Millisecond)
+
+	sendStr(t, client, `<presence to='bob@example.com' type='unsubscribe' xmlns='jabber:client'/>`)
+
+	select {
+	case raw := <-bobReceived:
+		if !strings.Contains(string(raw), "unsubscribe") {
+			t.Errorf("expected unsubscribe at Bob; got: %s", raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout: unsubscribe not routed to Bob")
+	}
+
+	items, _, err := stores.Roster.Get(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("roster get: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 roster item, got %d", len(items))
+	}
+	if items[0].Subscription != 1 {
+		t.Errorf("expected subscription=from (1) after unsubscribe from both, got %d", items[0].Subscription)
+	}
+}
+
+func TestInitialPresenceBroadcastToContacts(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "pass")
+
+	rm := roster.New(stores.Roster, slog.Default())
+	ctx := context.Background()
+	// Bob is subscribed from Alice (Alice has subscription=from for Bob).
+	_, _ = stores.Roster.Put(ctx, &storage.RosterItem{
+		Owner:        "alice@example.com",
+		Contact:      "bob@example.com",
+		Subscription: 1, // from
+		Ask:          0,
+	})
+
+	r := router.New()
+	pb := presence.New(r, rm, slog.Default())
+	mods := &Modules{Roster: rm, Presence: pb}
+
+	bobReceived := make(chan []byte, 4)
+	bobJID, _ := stanza.Parse("bob@example.com/r1")
+	bobSess := &routerMockSession{j: bobJID, available: true, ch: bobReceived}
+	r.Register(bobSess)
+	defer r.Unregister(bobSess)
+
+	client, cancel := authenticateSessionWithRouter(t, stores, mods, r, "alice", "pass")
+	defer cancel()
+	time.Sleep(30 * time.Millisecond)
+
+	sendStr(t, client, `<presence xmlns='jabber:client'/>`)
+
+	select {
+	case raw := <-bobReceived:
+		s := string(raw)
+		if strings.Contains(s, "subscribe") || strings.Contains(s, "unavailable") {
+			t.Errorf("unexpected presence type at Bob; got: %s", s)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout: Alice's initial presence not broadcasted to Bob")
 	}
 }

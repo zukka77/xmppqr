@@ -120,6 +120,63 @@ func TestPEPAutoCreateAndNotify(t *testing.T) {
 	}
 }
 
+func TestOMEMODevicelistRoundTrip(t *testing.T) {
+	svc, _ := newTestPEP(t)
+	ctx := context.Background()
+	from, _ := stanza.Parse("alice@example.com/work")
+	node := "eu.siacs.conversations.axolotl.devicelist"
+
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	wrappedPayload := append([]byte("<list xmlns='eu.siacs.conversations.axolotl'>"), payload...)
+	wrappedPayload = append(wrappedPayload, []byte("</list>")...)
+
+	iq := buildPEPPublishIQ(node, "current", wrappedPayload)
+	raw, err := svc.HandleIQ(ctx, from, iq)
+	if err != nil {
+		t.Fatalf("publish HandleIQ: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`type="result"`)) {
+		t.Fatalf("expected result IQ, got: %s", raw)
+	}
+
+	fetchIQ := &stanza.IQ{
+		ID:   "fetch1",
+		From: "alice@example.com/work",
+		To:   "alice@example.com",
+		Type: stanza.IQGet,
+	}
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	psEl := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/pubsub", Local: "pubsub"}}
+	itemsEl := xml.StartElement{
+		Name: xml.Name{Local: "items"},
+		Attr: []xml.Attr{
+			{Name: xml.Name{Local: "node"}, Value: node},
+			{Name: xml.Name{Local: "max_items"}, Value: "1"},
+		},
+	}
+	enc.EncodeToken(psEl)
+	enc.EncodeToken(itemsEl)
+	enc.EncodeToken(itemsEl.End())
+	enc.EncodeToken(psEl.End())
+	enc.Flush()
+	fetchIQ.Payload = buf.Bytes()
+
+	raw, err = svc.HandleIQ(ctx, from, fetchIQ)
+	if err != nil {
+		t.Fatalf("fetch HandleIQ: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`id="current"`)) {
+		t.Fatalf("expected item id=current in response, got: %s", raw)
+	}
+	if !bytes.Contains(raw, []byte("eu.siacs.conversations.axolotl.devicelist")) {
+		t.Fatalf("expected node name in response, got: %s", raw)
+	}
+}
+
 func TestPEPForbiddenWrongTo(t *testing.T) {
 	svc, _ := newTestPEP(t)
 	ctx := context.Background()

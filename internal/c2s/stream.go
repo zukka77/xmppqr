@@ -9,12 +9,16 @@ import (
 	"encoding/xml"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/disco"
 	"github.com/danielinux/xmppqr/internal/spqr"
 	"github.com/danielinux/xmppqr/internal/stanza"
+	"github.com/danielinux/xmppqr/internal/version"
 	xmlpkg "github.com/danielinux/xmppqr/internal/xml"
 )
+
+var serverStartTime = time.Now()
 
 func runStream(ctx context.Context, s *Session) error {
 	hdr, err := s.dec.OpenStream(ctx)
@@ -258,6 +262,10 @@ func handleStanza(ctx context.Context, s *Session, start xml.StartElement, raw [
 		}
 	}
 
+	if start.Name.Local == "presence" && toJID == "" {
+		return handleBarePresence(ctx, s, start, raw)
+	}
+
 	if toJID == "" {
 		return nil
 	}
@@ -354,19 +362,41 @@ func handlePresence(ctx context.Context, s *Session, start xml.StartElement, raw
 	switch presType {
 	case stanza.PresenceSubscribe:
 		if mods != nil && mods.Roster != nil {
-			_, _ = mods.Roster.Subscribe(ctx, s.jid.Bare().String(), j.Bare())
+			item, _ := mods.Roster.Subscribe(ctx, s.jid.Bare().String(), j.Bare())
+			s.sendRosterPush(ctx, item)
 		}
 		if s.cfg.Router != nil {
 			_, _ = s.cfg.Router.RouteToBare(ctx, j.Bare(), raw)
 		}
 	case stanza.PresenceSubscribed:
 		if mods != nil && mods.Roster != nil {
-			_ = mods.Roster.Subscribed(ctx, s.jid.Bare().String(), j.Bare())
+			item, _ := mods.Roster.Subscribed(ctx, s.jid.Bare().String(), j.Bare())
+			s.sendRosterPush(ctx, item)
+			if curPres := s.currentAvailablePresence(); curPres != nil && s.cfg.Router != nil {
+				_, _ = s.cfg.Router.RouteToBare(ctx, j.Bare(), curPres)
+			}
 		}
 		if s.cfg.Router != nil {
 			_, _ = s.cfg.Router.RouteToBare(ctx, j.Bare(), raw)
 		}
-	case stanza.PresenceUnsubscribe, stanza.PresenceUnsubscribed:
+	case stanza.PresenceUnsubscribe:
+		if mods != nil && mods.Roster != nil {
+			item, _ := mods.Roster.Unsubscribe(ctx, s.jid.Bare().String(), j.Bare())
+			s.sendRosterPush(ctx, item)
+		}
+		if s.cfg.Router != nil {
+			_, _ = s.cfg.Router.RouteToBare(ctx, j.Bare(), raw)
+		}
+	case stanza.PresenceUnsubscribed:
+		if mods != nil && mods.Roster != nil {
+			item, _ := mods.Roster.Unsubscribed(ctx, s.jid.Bare().String(), j.Bare())
+			s.sendRosterPush(ctx, item)
+			if s.cfg.Router != nil {
+				for _, unavail := range s.unavailablePresenceStanzas() {
+					_, _ = s.cfg.Router.RouteToBare(ctx, j.Bare(), unavail)
+				}
+			}
+		}
 		if s.cfg.Router != nil {
 			_, _ = s.cfg.Router.RouteToBare(ctx, j.Bare(), raw)
 		}
@@ -398,6 +428,39 @@ func handlePresence(ctx context.Context, s *Session, start xml.StartElement, raw
 			} else {
 				_, _ = s.cfg.Router.RouteToBare(ctx, j, raw)
 			}
+		}
+	}
+
+	atomic.AddUint32(&s.smInH, 1)
+	return nil
+}
+
+func handleBarePresence(ctx context.Context, s *Session, start xml.StartElement, raw []byte) error {
+	presType := ""
+	for _, a := range start.Attr {
+		if a.Name.Local == "type" {
+			presType = a.Value
+			break
+		}
+	}
+
+	mods := s.cfg.Modules
+
+	switch presType {
+	case "", "available":
+		atomic.StoreInt32(&s.avail, 1)
+		if mods != nil && mods.Presence != nil {
+			if !s.initialPresenceSent {
+				s.initialPresenceSent = true
+				_ = mods.Presence.OnInitialPresence(ctx, s, raw)
+			} else {
+				_ = mods.Presence.OnPresenceUpdate(ctx, s, raw)
+			}
+		}
+	case stanza.PresenceUnavailable:
+		atomic.StoreInt32(&s.avail, 0)
+		if mods != nil && mods.Presence != nil {
+			_ = mods.Presence.OnUnavailablePresence(ctx, s, raw)
 		}
 	}
 
@@ -508,8 +571,17 @@ func dispatchLocalIQ(ctx context.Context, s *Session, iq *stanza.IQ) ([]byte, er
 			}
 			return mods.MAM.HandleIQ(ctx, iq, ownerBare, deliver)
 		}
-	case "http://jabber.org/protocol/pubsub":
+	case "http://jabber.org/protocol/pubsub", "http://jabber.org/protocol/pubsub#owner":
+		if mods != nil && mods.PEP != nil {
+			if iq.From == "" {
+				iq.From = s.jid.String()
+			}
+			return mods.PEP.HandleIQ(ctx, s.jid, iq)
+		}
 		if mods != nil && mods.PubSub != nil {
+			if iq.From == "" {
+				iq.From = s.jid.String()
+			}
 			return mods.PubSub.HandleIQ(ctx, s.jid.Bare(), iq)
 		}
 	case "urn:xmpp:push:0":
@@ -526,6 +598,29 @@ func dispatchLocalIQ(ctx context.Context, s *Session, iq *stanza.IQ) ([]byte, er
 			result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult, Payload: raw}
 			return result.Marshal()
 		}
+	case "urn:ietf:params:xml:ns:xmpp-session":
+		result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult}
+		return result.Marshal()
+	case "jabber:iq:version":
+		payload := fmt.Sprintf(
+			`<query xmlns='jabber:iq:version'><name>%s</name><version>%s</version><os>%s</os></query>`,
+			version.Name(), version.Version(), version.OS(),
+		)
+		result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult, Payload: []byte(payload)}
+		return result.Marshal()
+	case "urn:xmpp:time":
+		now := time.Now().UTC()
+		payload := fmt.Sprintf(
+			`<time xmlns='urn:xmpp:time'><tzo>+00:00</tzo><utc>%s</utc></time>`,
+			now.Format("2006-01-02T15:04:05Z"),
+		)
+		result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult, Payload: []byte(payload)}
+		return result.Marshal()
+	case "jabber:iq:last":
+		secs := int64(time.Since(serverStartTime).Seconds())
+		payload := fmt.Sprintf(`<query xmlns='jabber:iq:last' seconds='%d'/>`, secs)
+		result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult, Payload: []byte(payload)}
+		return result.Marshal()
 	case "urn:xmpp:ping":
 		result := &stanza.IQ{ID: iq.ID, From: iq.To, To: iq.From, Type: stanza.IQResult}
 		return result.Marshal()

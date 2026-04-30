@@ -227,6 +227,41 @@ func TestRetractRemovesItem(t *testing.T) {
 	}
 }
 
+func TestPublishOversizedRejected(t *testing.T) {
+	stores := memstore.New()
+	r := router.New()
+	jid, _ := stanza.Parse("alice@example.com/res")
+	sess := &mockSession{jid: jid}
+	r.Register(sess)
+	svc := New(stores.PEP, r, slog.Default(), 0)
+
+	ctx := context.Background()
+	owner, _ := stanza.Parse("alice@example.com/res")
+	node := "eu.siacs.conversations.axolotl.bundles:12345678"
+
+	bigPayload := make([]byte, 1<<20)
+	for i := range bigPayload {
+		bigPayload[i] = 'x'
+	}
+
+	items := []rawItem{{ID: "current", Payload: bigPayload}}
+	pubIQ := buildPublishIQ(node, items)
+	raw, err := svc.HandleIQ(ctx, owner, pubIQ)
+	if err != nil {
+		t.Fatalf("unexpected go error: %v", err)
+	}
+	if !bytes.Contains(raw, []byte("policy-violation")) {
+		t.Fatalf("expected policy-violation for 1MB payload, got: %s", raw[:min(len(raw), 256)])
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func TestNotifyDispatched(t *testing.T) {
 	svc, _, sess := newTestService(t)
 	ctx := context.Background()
