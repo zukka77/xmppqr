@@ -13,6 +13,14 @@ import (
 
 const nsXMPPTLS = "urn:ietf:params:xml:ns:xmpp-tls"
 
+var startTLSHandshake = func(ctx *xtls.Context, conn net.Conn) (tlsConnIface, error) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return nil, fmt.Errorf("starttls: expected *net.TCPConn, got %T", conn)
+	}
+	return xtls.ServerHandshake(ctx, tcp)
+}
+
 // RunSTARTTLS drives the plaintext pre-TLS XMPP stream on tcp, performs the
 // STARTTLS upgrade per RFC 6120 §5, then runs a normal c2s session on the
 // resulting TLS connection.
@@ -25,10 +33,14 @@ const nsXMPPTLS = "urn:ietf:params:xml:ns:xmpp-tls"
 //   5. wolfSSL handshake on the same TCP socket
 //   6. Hand off to NewSession + Run
 func RunSTARTTLS(ctx context.Context, tcp *net.TCPConn, tlsCtx *xtls.Context, cfg SessionConfig) error {
-	defer tcp.Close()
+	return runStartTLS(ctx, tcp, tlsCtx, cfg)
+}
 
-	dec := xmldec.NewDecoder(tcp)
-	enc := xmldec.NewEncoder(tcp)
+func runStartTLS(ctx context.Context, conn net.Conn, tlsCtx *xtls.Context, cfg SessionConfig) error {
+	defer conn.Close()
+
+	dec := xmldec.NewDecoder(conn)
+	enc := xmldec.NewEncoder(conn)
 
 	hdr, err := dec.OpenStream(ctx)
 	if err != nil {
@@ -71,7 +83,7 @@ func RunSTARTTLS(ctx context.Context, tcp *net.TCPConn, tlsCtx *xtls.Context, cf
 		return fmt.Errorf("starttls: write proceed: %w", err)
 	}
 
-	tlsConn, err := xtls.ServerHandshake(tlsCtx, tcp)
+	tlsConn, err := startTLSHandshake(tlsCtx, conn)
 	if err != nil {
 		return fmt.Errorf("starttls: tls handshake: %w", err)
 	}

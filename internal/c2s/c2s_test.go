@@ -3,9 +3,12 @@ package c2s
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +187,71 @@ func driveSCRAMSHA256(t *testing.T, client net.Conn, username, password string) 
 	return readUntil(t, client, "</", 3*time.Second)
 }
 
+func driveLegacySCRAMSHA256(t *testing.T, client net.Conn, username, password string) string {
+	t.Helper()
+	clientNonce := "testclientnonce1"
+	clientFirstBare := fmt.Sprintf("n=%s,r=%s", username, clientNonce)
+	clientFirst := "n,," + clientFirstBare
+	clientFirstB64 := base64.StdEncoding.EncodeToString([]byte(clientFirst))
+
+	sendStr(t, client, fmt.Sprintf(
+		`<auth xmlns='%s' mechanism='SCRAM-SHA-256'>%s</auth>`,
+		nsSASL, clientFirstB64,
+	))
+
+	raw := readUntil(t, client, "</challenge>", 3*time.Second)
+	challengeB64 := extractTagContent(raw, "challenge")
+	if challengeB64 == "" {
+		t.Fatalf("no challenge received, got: %s", raw)
+	}
+	challengeBytes, err := base64.StdEncoding.DecodeString(challengeB64)
+	if err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	serverFirst := string(challengeBytes)
+
+	fields := parseKVTest(serverFirst)
+	saltB64 := fields["s"]
+	iterStr := fields["i"]
+	combinedNonce := fields["r"]
+	salt, _ := base64.StdEncoding.DecodeString(saltB64)
+	var iter int
+	fmt.Sscanf(iterStr, "%d", &iter)
+
+	saltedPwd, err := goSHA256PBKDF2([]byte(password), salt, iter, 32)
+	if err != nil {
+		t.Fatalf("pbkdf2: %v", err)
+	}
+	clientKey := goHMACSHA256(saltedPwd, []byte("Client Key"))
+	storedKey := goSHA256(clientKey)
+	cbindB64 := base64.StdEncoding.EncodeToString([]byte("n,,"))
+	clientFinalWithoutProof := fmt.Sprintf("c=%s,r=%s", cbindB64, combinedNonce)
+	authMessage := clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
+	clientSig := goHMACSHA256(storedKey[:], []byte(authMessage))
+	proof := make([]byte, len(clientKey))
+	for i := range clientKey {
+		proof[i] = clientKey[i] ^ clientSig[i]
+	}
+	proofB64 := base64.StdEncoding.EncodeToString(proof)
+	clientFinal := clientFinalWithoutProof + ",p=" + proofB64
+	clientFinalB64 := base64.StdEncoding.EncodeToString([]byte(clientFinal))
+
+	sendStr(t, client, fmt.Sprintf(`<response xmlns='%s'>%s</response>`, nsSASL, clientFinalB64))
+	return readUntil(t, client, "</success>", 3*time.Second)
+}
+
+func driveLegacyPlain(t *testing.T, client net.Conn, username, password string) string {
+	t.Helper()
+	payload := append([]byte{0}, []byte(username)...)
+	payload = append(payload, 0)
+	payload = append(payload, []byte(password)...)
+	sendStr(t, client, fmt.Sprintf(
+		`<auth xmlns='%s' mechanism='PLAIN'>%s</auth>`,
+		nsSASL, base64.StdEncoding.EncodeToString(payload),
+	))
+	return readUntil(t, client, "</success>", 3*time.Second)
+}
+
 func extractTagContent(s, tagName string) string {
 	open := "<" + tagName
 	close := "</" + tagName + ">"
@@ -229,8 +297,8 @@ func TestStreamOpenAndFeatures(t *testing.T) {
 	if !strings.Contains(got, "<stream:stream") {
 		t.Errorf("missing stream header; got: %s", got)
 	}
-	if !strings.Contains(got, nsSASL2) {
-		t.Errorf("missing SASL2 ns; got: %s", got)
+	if !strings.Contains(got, nsSASL) {
+		t.Errorf("missing SASL mechanisms ns; got: %s", got)
 	}
 	if !strings.Contains(got, "SCRAM-SHA-256") {
 		t.Errorf("missing SCRAM-SHA-256; got: %s", got)
@@ -274,6 +342,57 @@ func TestSASL2Success(t *testing.T) {
 	if !strings.Contains(result, "alice@example.com") {
 		t.Errorf("expected JID in success; got: %s", result)
 	}
+	if !strings.Contains(result, "<additional-data>") {
+		t.Errorf("expected SCRAM server-final in SASL2 success; got: %s", result)
+	}
+}
+
+func TestRunSTARTTLSUpgradeFlow(t *testing.T) {
+	client, server := testPipe(t)
+
+	prevHandshake := startTLSHandshake
+	startTLSHandshake = func(_ *xtls.Context, conn net.Conn) (tlsConnIface, error) {
+		return &mockTLSConn{Conn: conn}, nil
+	}
+	defer func() {
+		startTLSHandshake = prevHandshake
+	}()
+
+	stores := memstore.New()
+	prepareUser(t, stores, "alice", "secret")
+
+	serverErr := make(chan error, 1)
+	go func() {
+		cfg := makeTestConfig(stores, router.New(), sm.NewStore(64))
+		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+		serverErr <- runStartTLS(context.Background(), server, nil, cfg)
+	}()
+
+	sendStr(t, client, `<?xml version='1.0'?><stream:stream from='user@example.com' to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+
+	preTLS := readUntil(t, client, "<starttls", 3*time.Second)
+	if !strings.Contains(preTLS, "<starttls xmlns='"+nsXMPPTLS+"'><required/></starttls>") {
+		t.Fatalf("missing required STARTTLS feature: %s", preTLS)
+	}
+
+	sendStr(t, client, `<starttls xmlns='`+nsXMPPTLS+`'/>`)
+
+	proceed := readUntil(t, client, "<proceed", 3*time.Second)
+	if !strings.Contains(proceed, "<proceed xmlns='"+nsXMPPTLS+"'/>") {
+		t.Fatalf("missing proceed response: %s", proceed)
+	}
+
+	sendStr(t, client, `<?xml version='1.0'?><stream:stream from='user@example.com' to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+
+	postTLS := readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+	if !strings.Contains(postTLS, nsSASL) {
+		t.Fatalf("missing post-STARTTLS SASL features: %s", postTLS)
+	}
+
+	_ = client.Close()
+	if err := <-serverErr; err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("RunSTARTTLS: %v", err)
+	}
 }
 
 func TestSASL2Failure(t *testing.T) {
@@ -293,6 +412,81 @@ func TestSASL2Failure(t *testing.T) {
 	result := driveSCRAMSHA256(t, client, "bob", "wrongpassword")
 	if !strings.Contains(result, "failure") && !strings.Contains(result, "not-authorized") {
 		t.Errorf("expected failure; got: %s", result)
+	}
+}
+
+func TestLegacySASLSuccessAndBind(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "dino", "secret")
+
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, makeTestConfig(stores, router.New(), sm.NewStore(64)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	readUntil(t, client, "SCRAM-SHA-256", 3*time.Second)
+
+	result := driveLegacySCRAMSHA256(t, client, "dino", "secret")
+	if !strings.Contains(result, "<success") {
+		t.Fatalf("expected success; got: %s", result)
+	}
+	if strings.Contains(result, "<additional-data>") {
+		t.Fatalf("legacy SASL success should contain raw base64 payload, got: %s", result)
+	}
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	postAuth := readUntil(t, client, "urn:ietf:params:xml:ns:xmpp-bind", 3*time.Second)
+	if !strings.Contains(postAuth, "urn:ietf:params:xml:ns:xmpp-bind") {
+		t.Fatalf("expected post-auth bind features; got: %s", postAuth)
+	}
+
+	sendStr(t, client, `<iq id='bind1' type='set'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/></iq>`)
+	bindResp := readUntil(t, client, "<jid>", 3*time.Second)
+	if !strings.Contains(bindResp, "<iq id='bind1' type='result'>") {
+		t.Fatalf("expected bind result; got: %s", bindResp)
+	}
+}
+
+func TestLegacyPlainSuccessAndBind(t *testing.T) {
+	stores := memstore.New()
+	prepareUser(t, stores, "plainuser", "secret")
+	u, err := stores.Users.Get(context.Background(), "plainuser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Argon2Params, err = auth.HashPasswordForStorage([]byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.Users.Put(context.Background(), u); err != nil {
+		t.Fatal(err)
+	}
+
+	client, server := testPipe(t)
+	s := NewSession(&mockTLSConn{server}, makeTestConfig(stores, router.New(), sm.NewStore(64)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go s.Run(ctx)
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	features := readUntil(t, client, "PLAIN", 3*time.Second)
+	if !strings.Contains(features, "PLAIN") {
+		t.Fatalf("expected PLAIN in mechanisms: %s", features)
+	}
+
+	result := driveLegacyPlain(t, client, "plainuser", "secret")
+	if !strings.Contains(result, "<success") {
+		t.Fatalf("expected success; got: %s", result)
+	}
+
+	sendStr(t, client, `<stream:stream to='example.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>`)
+	postAuth := readUntil(t, client, "urn:ietf:params:xml:ns:xmpp-bind", 3*time.Second)
+	if !strings.Contains(postAuth, "urn:ietf:params:xml:ns:xmpp-bind") {
+		t.Fatalf("expected post-auth bind features; got: %s", postAuth)
 	}
 }
 

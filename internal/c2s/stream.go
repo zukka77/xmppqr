@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
@@ -36,22 +37,30 @@ func runStream(ctx context.Context, s *Session) error {
 		return err
 	}
 
-	username, err := authLoop(ctx, s)
+	authRes, err := authLoop(ctx, s)
 	if err != nil {
 		return err
 	}
-	s.jid = stanza.JID{Local: username, Domain: s.cfg.Domain}
+	s.jid = stanza.JID{Local: authRes.Username, Domain: s.cfg.Domain}
 
-	bindExtras, err := bindLoop(ctx, s)
-	if err != nil {
-		return err
+	switch authRes.Style {
+	case authStyleLegacy:
+		if err := sendLegacySASLSuccess(s, authRes.ServerFinal); err != nil {
+			return err
+		}
+		if err := restartPostAuthStream(ctx, s); err != nil {
+			return err
+		}
+	default:
+		bindExtras, err := bindLoop(ctx, s)
+		if err != nil {
+			return err
+		}
+		fullJID := s.jid.String()
+		if err := sendSASL2Success(s, fullJID, bindExtras, authRes.ServerFinal); err != nil {
+			return err
+		}
 	}
-
-	fullJID := s.jid.String()
-	_, _ = s.enc.WriteRaw([]byte(fmt.Sprintf(
-		`<success xmlns='%s'><authorization-identifier>%s</authorization-identifier>%s</success>`,
-		nsSASL2, fullJID, bindExtras,
-	)))
 
 	if s.cfg.Router != nil {
 		s.cfg.Router.Register(s)
@@ -80,23 +89,74 @@ func newStreamID() string {
 	return hex.EncodeToString(b)
 }
 
-func authLoop(ctx context.Context, s *Session) (string, error) {
+func authLoop(ctx context.Context, s *Session) (*authResult, error) {
 	for {
 		start, raw, err := s.dec.NextElement()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		switch start.Name.Local {
 		case "authenticate":
-			username, err := handleAuthenticate(ctx, s, start, raw)
-			if err != nil {
-				return "", err
+			s.log.Info("pre-auth mechanism", "element", "authenticate", "ns", start.Name.Space, "mechanism", authMechanism(start))
+			return handleAuthenticate(ctx, s, start, raw)
+		case "auth":
+			if start.Name.Space != nsSASL {
+				s.log.Warn("pre-auth: unexpected auth namespace", "ns", start.Name.Space)
+				continue
 			}
-			return username, nil
+			s.log.Info("pre-auth mechanism", "element", "auth", "ns", start.Name.Space, "mechanism", authMechanism(start))
+			return handleLegacyAuth(ctx, s, start, raw)
 		default:
 			s.log.Warn("pre-auth: unexpected element", "local", start.Name.Local, "ns", start.Name.Space)
 		}
 	}
+}
+
+func authMechanism(start xml.StartElement) string {
+	for _, a := range start.Attr {
+		if a.Name.Local == "mechanism" {
+			return a.Value
+		}
+	}
+	return ""
+}
+
+func sendSASL2Success(s *Session, fullJID string, bindExtras string, serverFinal []byte) error {
+	var extraData string
+	if len(serverFinal) > 0 {
+		extraData = fmt.Sprintf(`<additional-data>%s</additional-data>`, base64.StdEncoding.EncodeToString(serverFinal))
+	}
+	_, err := s.enc.WriteRaw([]byte(fmt.Sprintf(
+		`<success xmlns='%s'>%s<authorization-identifier>%s</authorization-identifier>%s</success>`,
+		nsSASL2, extraData, fullJID, bindExtras,
+	)))
+	return err
+}
+
+func sendLegacySASLSuccess(s *Session, serverFinal []byte) error {
+	payload := ""
+	if len(serverFinal) > 0 {
+		payload = base64.StdEncoding.EncodeToString(serverFinal)
+	}
+	_, err := s.enc.WriteRaw([]byte(fmt.Sprintf(`<success xmlns='%s'>%s</success>`, nsSASL, payload)))
+	return err
+}
+
+func restartPostAuthStream(ctx context.Context, s *Session) error {
+	hdr, err := s.dec.OpenStream(ctx)
+	if err != nil {
+		return err
+	}
+	if hdr.To != "" && hdr.To != s.cfg.Domain {
+		_ = sendStreamHeader(s, "")
+		_, _ = s.enc.WriteRaw(streamError("host-unknown"))
+		return fmt.Errorf("host-unknown: client requested %q", hdr.To)
+	}
+	if err := sendStreamHeader(s, newStreamID()); err != nil {
+		return err
+	}
+	_, err = s.enc.WriteRaw(buildLegacyPostAuthFeatures())
+	return err
 }
 
 func bindLoop(ctx context.Context, s *Session) (string, error) {

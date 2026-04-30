@@ -1,7 +1,6 @@
 package c2s
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -26,26 +25,21 @@ var preferredMechs = []string{
 	string(auth.SCRAMSHA256),
 }
 
+var legacyMechs = []string{
+	string(auth.SCRAMSHA512Plus),
+	string(auth.SCRAMSHA256Plus),
+	string(auth.SCRAMSHA512),
+	string(auth.SCRAMSHA256),
+	string(auth.Plain),
+}
+
 func buildFeatures(s *Session, sasl bool, bind bool) []byte {
 	var b strings.Builder
 	b.WriteString(`<stream:features>`)
 
 	if sasl {
-		// XEP-0388 SASL2
-		b.WriteString(fmt.Sprintf(`<authentication xmlns='%s'>`, nsSASL2))
-		for _, m := range preferredMechs {
-			b.WriteString(fmt.Sprintf(`<mechanism>%s</mechanism>`, m))
-		}
-		// XEP-0474 downgrade protection
-		hash := auth.ComputeMechanismListHash(preferredMechs)
-		hashB64 := base64.StdEncoding.EncodeToString(hash)
-		b.WriteString(fmt.Sprintf(`<inline><mechanisms xmlns='%s'><mechanism>%s</mechanism></mechanisms></inline>`,
-			nsDowngrade, hashB64))
-		b.WriteString(`</authentication>`)
-
-		// Classical XEP-0086 SASL <mechanisms>
 		b.WriteString(fmt.Sprintf(`<mechanisms xmlns='%s'>`, nsSASL))
-		for _, m := range preferredMechs {
+		for _, m := range legacyMechs {
 			b.WriteString(fmt.Sprintf(`<mechanism>%s</mechanism>`, m))
 		}
 		b.WriteString(`</mechanisms>`)
@@ -57,6 +51,16 @@ func buildFeatures(s *Session, sasl bool, bind bool) []byte {
 		b.WriteString(fmt.Sprintf(`<csi xmlns='%s'/>`, nsCSI))
 	}
 
+	b.WriteString(`</stream:features>`)
+	return []byte(b.String())
+}
+
+func buildLegacyPostAuthFeatures() []byte {
+	var b strings.Builder
+	b.WriteString(`<stream:features>`)
+	b.WriteString(`<bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'/>`)
+	b.WriteString(fmt.Sprintf(`<sm xmlns='%s'/>`, nsSM))
+	b.WriteString(fmt.Sprintf(`<csi xmlns='%s'/>`, nsCSI))
 	b.WriteString(`</stream:features>`)
 	return []byte(b.String())
 }

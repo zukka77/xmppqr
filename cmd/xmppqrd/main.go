@@ -62,6 +62,9 @@ func main() {
 	if cfg.Listeners.C2SDirectTLS == "" {
 		cfg.Listeners.C2SDirectTLS = ":5223"
 	}
+	if cfg.Listeners.C2SStartTLS == "" {
+		cfg.Listeners.C2SStartTLS = ":5222"
+	}
 	if cfg.Listeners.AdminPProf == "" {
 		cfg.Listeners.AdminPProf = "127.0.0.1:6060"
 	}
