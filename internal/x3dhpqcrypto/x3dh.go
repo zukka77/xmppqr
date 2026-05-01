@@ -9,11 +9,13 @@ import (
 )
 
 const (
-	infoX3DH          = "X3DHPQ-X3DH-PQ-v0"
-	infoRootKey       = "X3DHPQ-RootKey-v0"
-	infoHybridRoot    = "X3DHPQ-HybridRoot-v0"
-	infoTripleRatchet = "X3DHPQ-TripleRatchet-v0"
-	infoMessageKey    = "X3DHPQ-MessageKey-v0"
+	infoX3DH                = "X3DHPQ-X3DH-PQ-v0"
+	infoRootKey             = "X3DHPQ-RootKey-v0"
+	infoHybridRoot          = "X3DHPQ-HybridRoot-v0"
+	infoMessageKey          = "X3DHPQ-MessageKey-v0"
+	infoCheckpointRootKey   = "X3DHPQ-RootKey-v1"
+	infoCheckpointChainSend = "X3DHPQ-ChainSend-v1"
+	infoCheckpointChainRecv = "X3DHPQ-ChainRecv-v1"
 )
 
 var ErrUntrustedDevice = errors.New("x3dhpqcrypto: device certificate not signed by expected AIK")

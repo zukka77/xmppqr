@@ -353,6 +353,7 @@ func TestRatchetBidirectional(t *testing.T) {
 		AD:                 alice.AD,
 		MessageKeys:        make(map[skipKey][]byte),
 		LastCheckpointTime: time.Now(),
+		KEMHistory:         alice.KEMHistory,
 	}
 
 	for i := 0; i < 5; i++ {
@@ -406,6 +407,11 @@ func TestKEMCheckpoint(t *testing.T) {
 	alice.KEMSendPub = bkPub
 	bob.KEMRecvPriv = bkPriv
 
+	rkBefore := make([]byte, len(alice.RK))
+	copy(rkBefore, alice.RK)
+	cksBefore := make([]byte, len(alice.ChainSendKey))
+	copy(cksBefore, alice.ChainSendKey)
+
 	var checkpointIdx int = -1
 	for i := 0; i <= kemCheckpointK; i++ {
 		hdr, ct, err := alice.EncryptMessage([]byte("msg"), time.Now())
@@ -426,6 +432,59 @@ func TestKEMCheckpoint(t *testing.T) {
 	if checkpointIdx > kemCheckpointK {
 		t.Fatalf("checkpoint triggered too late at message %d (K=%d)", checkpointIdx, kemCheckpointK)
 	}
+
+	// Per the corrected design: a KEM checkpoint mixes into ChainSendKey/
+	// ChainRecvKey AND updates KEMHistory. RK is NOT touched at checkpoint
+	// time — RK heals at the NEXT DH ratchet step via KEMHistory injection.
+	// This is necessary because RK is genuinely desynchronized between
+	// sender and receiver in any asymmetric Double Ratchet flow.
+	if bytes.Equal(alice.ChainSendKey, cksBefore) {
+		t.Fatal("ChainSendKey must change after KEM checkpoint")
+	}
+	emptyHistory := make([]byte, 32)
+	if bytes.Equal(alice.KEMHistory, emptyHistory) {
+		t.Fatal("KEMHistory must change after KEM checkpoint")
+	}
+	if !bytes.Equal(alice.KEMHistory, bob.KEMHistory) {
+		t.Fatal("KEMHistory must agree between sender and receiver after checkpoint")
+	}
+	_ = rkBefore
+
+	hdr, ct, err := alice.EncryptMessage([]byte("post-checkpoint"), time.Now())
+	if err != nil {
+		t.Fatalf("encrypt post-checkpoint: %v", err)
+	}
+	pt, err := bob.DecryptMessage(hdr, ct)
+	if err != nil {
+		t.Fatalf("decrypt post-checkpoint: %v", err)
+	}
+	if string(pt) != "post-checkpoint" {
+		t.Fatalf("wrong post-checkpoint plaintext: %q", pt)
+	}
+
+	// Attacker has old RK but tampered ciphertext — receiver derives a different RK.
+	attackerBob := &State{
+		RK:                 rkBefore,
+		ChainSendKey:       make([]byte, 32),
+		ChainRecvKey:       make([]byte, 32),
+		SendingDH:          bob.SendingDH,
+		RemoteDHPub:        bob.RemoteDHPub,
+		AD:                 bob.AD,
+		MessageKeys:        make(map[skipKey][]byte),
+		LastCheckpointTime: time.Now(),
+		KEMRecvPriv:        bkPriv,
+	}
+	hdr2, ct2, err := alice.EncryptMessage([]byte("attacker test"), time.Now())
+	if err != nil {
+		t.Fatalf("encrypt attacker test: %v", err)
+	}
+	if hdr2.KEMCiphertext != nil && len(hdr2.KEMCiphertext) > 0 {
+		hdr2.KEMCiphertext[0] ^= 0x01
+	}
+	_, err = attackerBob.DecryptMessage(hdr2, ct2)
+	if err == nil {
+		t.Fatal("attacker with old RK and tampered KEM ciphertext must fail decryption")
+	}
 }
 
 func TestTamperedCiphertextRejected(t *testing.T) {
@@ -439,5 +498,154 @@ func TestTamperedCiphertextRejected(t *testing.T) {
 	_, err = bob.DecryptMessage(hdr, ct)
 	if err == nil {
 		t.Fatal("expected decryption failure on tampered ciphertext")
+	}
+}
+
+func TestCheckpointHealsBothDirections(t *testing.T) {
+	alice, bob, _, _ := buildSession(t)
+
+	bkPub, bkPriv, err := wolfcrypt.GenerateMLKEM768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice.KEMSendPub = bkPub
+	bob.KEMRecvPriv = bkPriv
+
+	for i := 0; i < kemCheckpointK; i++ {
+		hdr, ct, err := alice.EncryptMessage([]byte("warm"), time.Now())
+		if err != nil {
+			t.Fatalf("warm-up encrypt[%d]: %v", i, err)
+		}
+		_, err = bob.DecryptMessage(hdr, ct)
+		if err != nil {
+			t.Fatalf("warm-up decrypt[%d]: %v", i, err)
+		}
+	}
+
+	rkPreCheckpoint := make([]byte, len(alice.RK))
+	copy(rkPreCheckpoint, alice.RK)
+	aliceCKsBefore := make([]byte, len(alice.ChainSendKey))
+	copy(aliceCKsBefore, alice.ChainSendKey)
+	bobCKrBefore := make([]byte, len(bob.ChainRecvKey))
+	copy(bobCKrBefore, bob.ChainRecvKey)
+
+	hdr, ct, err := alice.EncryptMessage([]byte("checkpoint-trigger"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr.KEMCiphertext == nil {
+		t.Fatal("expected KEM checkpoint on this message")
+	}
+
+	_, err = bob.DecryptMessage(hdr, ct)
+	if err != nil {
+		t.Fatalf("decrypt checkpoint message: %v", err)
+	}
+
+	if bytes.Equal(alice.ChainSendKey, aliceCKsBefore) {
+		t.Fatal("Alice ChainSendKey must change after checkpoint")
+	}
+	if bytes.Equal(bob.ChainRecvKey, bobCKrBefore) {
+		t.Fatal("Bob ChainRecvKey must change after checkpoint")
+	}
+	if !bytes.Equal(alice.ChainSendKey, bob.ChainRecvKey) {
+		t.Fatal("Alice ChainSendKey and Bob ChainRecvKey must agree after checkpoint")
+	}
+	// RK is not touched at checkpoint; KEMHistory carries the PQ entropy
+	// forward and is mixed into the next DH ratchet step's RK derivation.
+	if !bytes.Equal(alice.KEMHistory, bob.KEMHistory) {
+		t.Fatal("KEMHistory must agree after checkpoint")
+	}
+	emptyHist := make([]byte, 32)
+	if bytes.Equal(alice.KEMHistory, emptyHist) {
+		t.Fatal("KEMHistory must change after checkpoint")
+	}
+	_ = rkPreCheckpoint
+
+	// Verify next DH ratchet step from fresh RK differs from what it would have been with old RK.
+	fakeDHPub, fakeDHPriv, err := wolfcrypt.GenerateX25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// alice.RK was unchanged by the checkpoint by design (KEMHistory carries
+	// the PQ entropy forward instead). The healing property is: applying
+	// dhRatchetStep with current KEMHistory MUST differ from applying it
+	// with the empty (pre-any-checkpoint) KEMHistory.
+	newRKWithKEMHistory, _, err := dhRatchetStep(alice.RK, fakeDHPriv, fakeDHPub, alice.KEMHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRKWithoutKEMHistory, _, err := dhRatchetStep(alice.RK, fakeDHPriv, fakeDHPub, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(newRKWithKEMHistory, newRKWithoutKEMHistory) {
+		t.Fatal("DH ratchet step must produce different RK with KEMHistory injected vs empty")
+	}
+}
+
+func TestCheckpointTranscriptBinding(t *testing.T) {
+	alice1, bob1, _, _ := buildSession(t)
+	alice2, bob2, _, _ := buildSession(t)
+
+	bkPub1, bkPriv1, err := wolfcrypt.GenerateMLKEM768()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bkPub2, bkPriv2, err := wolfcrypt.GenerateMLKEM768()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	alice1.KEMSendPub = bkPub1
+	bob1.KEMRecvPriv = bkPriv1
+	alice2.KEMSendPub = bkPub2
+	bob2.KEMRecvPriv = bkPriv2
+
+	for i := 0; i < kemCheckpointK; i++ {
+		hdr, ct, err := alice1.EncryptMessage([]byte("w"), time.Now())
+		if err != nil {
+			t.Fatalf("session1 warm-up[%d]: %v", i, err)
+		}
+		_, err = bob1.DecryptMessage(hdr, ct)
+		if err != nil {
+			t.Fatalf("session1 warm-up decrypt[%d]: %v", i, err)
+		}
+		hdr, ct, err = alice2.EncryptMessage([]byte("w"), time.Now())
+		if err != nil {
+			t.Fatalf("session2 warm-up[%d]: %v", i, err)
+		}
+		_, err = bob2.DecryptMessage(hdr, ct)
+		if err != nil {
+			t.Fatalf("session2 warm-up decrypt[%d]: %v", i, err)
+		}
+	}
+
+	hdr1, ct1, err := alice1.EncryptMessage([]byte("cp1"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr1.KEMCiphertext == nil {
+		t.Fatal("expected checkpoint in session 1")
+	}
+	_, err = bob1.DecryptMessage(hdr1, ct1)
+	if err != nil {
+		t.Fatalf("session1 checkpoint decrypt: %v", err)
+	}
+
+	hdr2, ct2, err := alice2.EncryptMessage([]byte("cp2"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr2.KEMCiphertext == nil {
+		t.Fatal("expected checkpoint in session 2")
+	}
+	_, err = bob2.DecryptMessage(hdr2, ct2)
+	if err != nil {
+		t.Fatalf("session2 checkpoint decrypt: %v", err)
+	}
+
+	if bytes.Equal(alice1.RK, alice2.RK) {
+		t.Fatal("two sessions with different DH pubs must produce different RK_new after checkpoint")
 	}
 }

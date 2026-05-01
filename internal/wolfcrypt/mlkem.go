@@ -3,7 +3,7 @@ package wolfcrypt
 /*
 #cgo pkg-config: wolfssl
 #include <wolfssl/options.h>
-#include <wolfssl/wolfcrypt/mlkem.h>
+#include <wolfssl/wolfcrypt/wc_mlkem.h>
 */
 import "C"
 import "unsafe"

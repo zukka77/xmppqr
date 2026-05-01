@@ -3,6 +3,7 @@ package x3dhpqcrypto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"time"
 
@@ -48,6 +49,15 @@ type State struct {
 	MessageKeys map[skipKey][]byte
 	AD          []byte
 
+	// KEMHistory accumulates entropy from every observed KEM checkpoint.
+	// Both parties update it identically (deterministic from kem_ss + transcript).
+	// It is mixed into the next DH ratchet step's RK derivation, so an
+	// attacker who has the current RK but missed any prior kem_ss cannot
+	// derive the post-DH-ratchet RK. This gives the "RK is healed by KEM
+	// checkpoints" property without requiring sender/receiver RK sync
+	// (which is impossible in an asymmetric Double Ratchet flow).
+	KEMHistory []byte
+
 	// whether we have received at least one message (enables DH ratchet on send)
 	receivedFirst bool
 	// pending DH ratchet step on next send
@@ -68,23 +78,77 @@ func chainStep(ck []byte) (mk, nextCK []byte, err error) {
 }
 
 // dhRatchetStep runs a DH ratchet step given a new remote DH public key.
+// kemHistory is folded into the IKM so any KEM-injected entropy from prior
+// checkpoints carries forward into the new RK. Both parties update KEMHistory
+// identically, so the resulting RK stays in sync.
 // It returns (newRK, newCK).
-func dhRatchetStep(rk, dhPriv, remotePub []byte) (newRK, newCK []byte, err error) {
+func dhRatchetStep(rk, dhPriv, remotePub, kemHistory []byte) (newRK, newCK []byte, err error) {
 	dhOut, err := wolfcrypt.X25519SharedSecret(dhPriv, remotePub)
 	if err != nil {
 		return nil, nil, err
 	}
-	out, err := hkdf64(rk, dhOut, infoRootKey)
+	ikm := make([]byte, 0, len(dhOut)+len(kemHistory))
+	ikm = append(ikm, dhOut...)
+	ikm = append(ikm, kemHistory...)
+	out, err := hkdf64(rk, ikm, infoRootKey)
 	if err != nil {
 		return nil, nil, err
 	}
 	return out[:32], out[32:], nil
 }
 
-// kemRatchetStep mixes a KEM shared secret into the chain.
-// Returns new chain key.
-func kemRatchetStep(ck, kemSS []byte) ([]byte, error) {
-	return hkdf32(ck, kemSS, infoTripleRatchet)
+// kemCheckpointMix re-derives both directions' chain keys and updates the
+// KEM history. Uses the SENDER's chain key (sender's CK_send == receiver's
+// CK_recv after every DH ratchet step) as the synchronized salt — this
+// avoids the desync issue that would occur with raw RK in asymmetric flows.
+//
+// The KEM history is a separate, deterministically-updated 32-byte digest
+// that both parties carry forward and inject at the next DH ratchet step,
+// healing the RK with PQ entropy.
+//
+// transcript_hash = SHA-512("X3DHPQ-Checkpoint-Transcript-v1\0" || uint32be(epoch) || senderDH || kemCT)
+// prk             = HKDF-Extract(salt=senderCK, ikm=kemSS||transcript_hash)
+// newCKs          = HKDF-Expand(prk, "X3DHPQ-ChainSend-v1", 32)
+// newCKr          = HKDF-Expand(prk, "X3DHPQ-ChainRecv-v1", 32)
+// newKEMHistory   = SHA-512("X3DHPQ-KEMHistory-v1\0" || prevHistory || kemSS || transcript_hash)[:32]
+func kemCheckpointMix(senderCK, kemSS, senderDH, kemCT []byte, epoch uint32, prevHistory []byte) (newCKs, newCKr, newHistory []byte, err error) {
+	const transcriptLabel = "X3DHPQ-Checkpoint-Transcript-v1\x00"
+	const historyLabel = "X3DHPQ-KEMHistory-v1\x00"
+	epochBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(epochBuf, epoch)
+	transcriptInput := make([]byte, 0, len(transcriptLabel)+4+len(senderDH)+len(kemCT))
+	transcriptInput = append(transcriptInput, transcriptLabel...)
+	transcriptInput = append(transcriptInput, epochBuf...)
+	transcriptInput = append(transcriptInput, senderDH...)
+	transcriptInput = append(transcriptInput, kemCT...)
+	th := wolfcrypt.SHA512(transcriptInput)
+
+	ikm := make([]byte, 0, len(kemSS)+64)
+	ikm = append(ikm, kemSS...)
+	ikm = append(ikm, th[:]...)
+
+	prk, err := wolfcrypt.HKDFExtract(senderCK, ikm)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	newCKs, err = wolfcrypt.HKDFExpand(prk, []byte(infoCheckpointChainSend), 32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	newCKr, err = wolfcrypt.HKDFExpand(prk, []byte(infoCheckpointChainRecv), 32)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	histInput := make([]byte, 0, len(historyLabel)+len(prevHistory)+len(kemSS)+64)
+	histInput = append(histInput, historyLabel...)
+	histInput = append(histInput, prevHistory...)
+	histInput = append(histInput, kemSS...)
+	histInput = append(histInput, th[:]...)
+	histDigest := wolfcrypt.SHA512(histInput)
+	newHistory = histDigest[:32]
+
+	return newCKs, newCKr, newHistory, nil
 }
 
 // deriveMessageKey expands a raw message key into AES key + nonce (44 bytes).
@@ -106,7 +170,11 @@ func NewSendingState(rootKey, ad []byte, peerDHPub []byte) (*State, error) {
 	ck := rootKey[32:]
 
 	// Run one DH ratchet step immediately so the send chain is initialized.
-	newRK, sendCK, err := dhRatchetStep(rk, priv, peerDHPub)
+	// Use a 32-zero-byte KEMHistory: matches the responder's initial state
+	// (NewReceivingState). On the responder's first DH ratchet (when they
+	// see the initiator's first message), they use the same zero-bytes,
+	// keeping RK in sync.
+	newRK, sendCK, err := dhRatchetStep(rk, priv, peerDHPub, make([]byte, 32))
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +187,7 @@ func NewSendingState(rootKey, ad []byte, peerDHPub []byte) (*State, error) {
 		AD:                 ad,
 		MessageKeys:        make(map[skipKey][]byte),
 		LastCheckpointTime: time.Now(),
+		KEMHistory:         make([]byte, 32),
 	}
 	_ = ck
 	return s, nil
@@ -132,6 +201,7 @@ func NewReceivingState(rootKey, ad []byte, myDH PrivPub) (*State, error) {
 		AD:                 ad,
 		MessageKeys:        make(map[skipKey][]byte),
 		LastCheckpointTime: time.Now(),
+		KEMHistory:         make([]byte, 32),
 	}
 	return s, nil
 }
@@ -160,12 +230,15 @@ func (s *State) EncryptMessage(plaintext []byte, now time.Time) (*MessageHeader,
 		newKEMPub = kPub
 		newKEMPriv = kPriv
 
-		// Mix into send chain.
-		newCK, err := kemRatchetStep(s.ChainSendKey, kemSS)
+		newCKs, newCKr, newHistory, err := kemCheckpointMix(
+			s.ChainSendKey, kemSS, s.SendingDH.Pub, kemCT, s.SendCount, s.KEMHistory,
+		)
 		if err != nil {
 			return nil, nil, err
 		}
-		s.ChainSendKey = newCK
+		s.ChainSendKey = newCKs
+		s.ChainRecvKey = newCKr
+		s.KEMHistory = newHistory
 		s.KEMSinceCheckpoint = 0
 		s.LastCheckpointTime = now
 		s.KEMRecvPriv = newKEMPriv
@@ -256,8 +329,10 @@ func (s *State) DecryptMessage(header *MessageHeader, ciphertext []byte) ([]byte
 		s.SendCount = 0
 		s.RecvCount = 0
 
-		// Advance receiving chain with new DHPub.
-		newRK, recvCK, err := dhRatchetStep(s.RK, s.SendingDH.Priv, header.DHPub)
+		// Advance receiving chain with new DHPub. KEMHistory mixes any prior
+		// PQ-checkpoint entropy into RK so post-DH-ratchet RK heals across
+		// any KEM checkpoint observed before this DH ratchet step.
+		newRK, recvCK, err := dhRatchetStep(s.RK, s.SendingDH.Priv, header.DHPub, s.KEMHistory)
 		if err != nil {
 			return nil, err
 		}
@@ -270,7 +345,7 @@ func (s *State) DecryptMessage(header *MessageHeader, ciphertext []byte) ([]byte
 		if err != nil {
 			return nil, err
 		}
-		newRK2, sendCK, err := dhRatchetStep(s.RK, newPriv, header.DHPub)
+		newRK2, sendCK, err := dhRatchetStep(s.RK, newPriv, header.DHPub, s.KEMHistory)
 		if err != nil {
 			return nil, err
 		}
@@ -285,11 +360,15 @@ func (s *State) DecryptMessage(header *MessageHeader, ciphertext []byte) ([]byte
 		if err != nil {
 			return nil, err
 		}
-		newCK, err := kemRatchetStep(s.ChainRecvKey, kemSS)
+		newCKs, newCKr, newHistory, err := kemCheckpointMix(
+			s.ChainRecvKey, kemSS, header.DHPub, header.KEMCiphertext, header.N, s.KEMHistory,
+		)
 		if err != nil {
 			return nil, err
 		}
-		s.ChainRecvKey = newCK
+		s.ChainRecvKey = newCKs
+		s.ChainSendKey = newCKr
+		s.KEMHistory = newHistory
 	}
 
 	// Skip to the message's position.

@@ -130,6 +130,7 @@ func exchangeMessages(sender, receiver *x3dhpqcrypto.State, n int) (int, error) 
 		AD:                 sender.AD,
 		MessageKeys:        make(map[x3dhpqcrypto.SkipKey][]byte),
 		LastCheckpointTime: now,
+		KEMHistory:         sender.KEMHistory,
 	}
 
 	replyHdrs := make([]*x3dhpqcrypto.MessageHeader, n)

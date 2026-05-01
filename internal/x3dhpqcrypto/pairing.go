@@ -87,7 +87,7 @@ type PairingExisting struct {
 }
 
 func NewPairingExisting(aik *AccountIdentityKey, code string, sid []byte, opts PairingOptions) (*PairingExisting, error) {
-	c, err := NewCPace(CPaceInitiator, []byte(code), sid, nil, nil)
+	c, err := NewCPace(CPaceInitiator, []byte(code), sid, CPaceContext{Purpose: "device-pairing"})
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +217,7 @@ type PairingNew struct {
 }
 
 func NewPairingNew(dik *DeviceIdentityKey, code string, sid []byte) (*PairingNew, error) {
-	c, err := NewCPace(CPaceResponder, []byte(code), sid, nil, nil)
+	c, err := NewCPace(CPaceResponder, []byte(code), sid, CPaceContext{Purpose: "device-pairing"})
 	if err != nil {
 		return nil, err
 	}

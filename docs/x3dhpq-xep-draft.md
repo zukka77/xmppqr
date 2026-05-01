@@ -181,13 +181,74 @@ where `dh1..dh4` are X25519 shared secrets and `kem_ss` is the ML-KEM-768 shared
 
 **KEM checkpoint (Triple Ratchet):**
 
+The KEM checkpoint serves two distinct purposes that operate on different state:
+
+1. **Immediate chain healing**: it re-derives both directions' symmetric chain keys (`ChainSendKey`, `ChainRecvKey`) using the ML-KEM-768 shared secret, so the next message's MK is unrecoverable from the pre-checkpoint chain key alone.
+2. **Deferred root-key healing**: it accumulates the KEM entropy into a 32-byte `KEMHistory` digest that both parties carry forward. At the next DH ratchet step, `KEMHistory` is folded into the IKM of `KDF_RK`, so the post-DH-ratchet `RK` is unrecoverable without every observed `kem_ss`.
+
+This split is necessary because the Double Ratchet's `RK` is intentionally desynchronized between sender and receiver in any asymmetric flow: when the receiver processes a DH-ratchet message, they perform two `KDF_RK` updates (one for the receive chain, one for a fresh send chain), while the sender performs only one. Mixing `kem_ss` directly into `RK` would therefore fail to converge between sides. `KEMHistory` is an explicit, deterministic, bidirectionally-synchronized accumulator that captures the same PQ entropy without disturbing the Double Ratchet's `RK` invariant.
+
 ```
-CK' = HKDF-SHA-512(
-    salt  = CK,
-    ikm   = ML-KEM-768.Decaps(kem_ct, kem_priv),
-    info  = "X3DHPQ-TripleRatchet-v0"
-) -> 32 bytes
+kem_ss = ML-KEM-768.Decaps(kem_ct, kem_priv)   // or Encaps output on sender
+
+transcript_hash = SHA-512(
+    "X3DHPQ-Checkpoint-Transcript-v1\0" ||
+    uint32-be(epoch)                    ||   // sender's SendCount at checkpoint
+    dh_pub_sender                       ||   // sender's DH pub from the message header
+    kem_ct                                   // the ML-KEM-768 ciphertext in the header
+)
+
+senderCK = sender's ChainSendKey  (≡ receiver's ChainRecvKey at checkpoint time)
+
+prk     = HKDF-Extract(salt = senderCK, ikm = kem_ss || transcript_hash)
+CKs_new = HKDF-Expand (prk, info = "X3DHPQ-ChainSend-v1", L = 32)
+CKr_new = HKDF-Expand (prk, info = "X3DHPQ-ChainRecv-v1", L = 32)
+
+KEMHistory_new = SHA-512(
+    "X3DHPQ-KEMHistory-v1\0" ||
+    KEMHistory_prev          ||
+    kem_ss                   ||
+    transcript_hash
+)[:32]
+
+// State update (sender)
+ChainSendKey ← CKs_new
+ChainRecvKey ← CKr_new
+KEMHistory   ← KEMHistory_new
+RK           unchanged
+
+// State update (receiver)
+ChainRecvKey ← CKs_new       // receiver's recv chain == sender's send chain
+ChainSendKey ← CKr_new       // and conversely
+KEMHistory   ← KEMHistory_new
+RK           unchanged
 ```
+
+The DH ratchet step then becomes:
+
+```
+dh_out = X25519(my_dh_priv, peer_dh_pub)
+RK_new, CK_new = HKDF(salt = RK,
+                      ikm  = dh_out || KEMHistory,
+                      info = "X3DHPQ-RootKey-v1",
+                      L    = 64)
+RK ← RK_new[:32]
+chain_key ← RK_new[32:]
+```
+
+Both parties update `KEMHistory` identically at every checkpoint. Both parties also feed identical inputs into `KDF_RK` at every DH ratchet step. So the `RK` resulting from any DH ratchet step *after* a KEM checkpoint depends on every `kem_ss` observed since the session began — whether or not the attacker observed `RK` at any earlier point.
+
+The `transcript_hash` binds the checkpoint to the specific message: an attacker who replaces `kem_ct` or `dh_pub_sender` causes the receiver's `prk` to differ, the receiver's chain keys to diverge, and the next message's AEAD to fail. We deliberately omit the receiver's DH pub from `transcript_hash` because in an asymmetric flow the sender's view of "receiver's current DH" lags the receiver's own current DH (receiver regenerates on each DH ratchet step) and including it would prevent convergence.
+
+**Post-compromise security claim (Triple Ratchet, 1:1):**
+
+After a successful KEM checkpoint at message *N* where the attacker did not observe the corresponding `kem_ss`:
+
+- Messages *N* and later in both directions cannot be decrypted using only the pre-checkpoint `ChainSendKey` and `ChainRecvKey`.
+- After the next DH ratchet step (in either direction), the resulting `RK` cannot be derived from the pre-checkpoint `RK` and observed protocol messages.
+- All chain keys subsequently derived from the post-DH-ratchet `RK` inherit this property.
+
+The recovery is bounded: an attacker who holds `RK`, `ChainSendKey`, `ChainRecvKey`, *and* `KEMHistory` at any point can derive all subsequent state until the next checkpoint. Healing requires (a) a KEM checkpoint event the attacker missed *and* (b) a DH ratchet step subsequent to that checkpoint. Group sender-key sessions (§13) do not provide this property; their security claims are described separately.
 
 **Chain key advancement:**
 
@@ -566,11 +627,11 @@ A KEM checkpoint fires on the sending side when:
 When a checkpoint fires:
 1. A fresh ML-KEM-768 keypair `(newKEMPub, newKEMPriv)` is generated.
 2. The KEM ciphertext is computed: `(kemCT, kemSS) = ML-KEM-768.Encaps(KEMSendPub)`.
-3. The send chain key is mixed: `ChainSendKey = HKDF-SHA-512(salt=ChainSendKey, ikm=kemSS, info="X3DHPQ-TripleRatchet-v0")`.
+3. The root key and both chain keys are updated via the normative state transition in §5 (see "KEM checkpoint (Triple Ratchet)" subsection): `RK`, `ChainSendKey`, and `ChainRecvKey` are all replaced.
 4. `kemCT` and `newKEMPub` are included in the message header.
-5. The receiver decapsulates and applies the same mix to its recv chain key.
+5. The receiver decapsulates `kemSS` and applies the same state transition, assigning `CKs_new → ChainRecvKey` and `CKr_new → ChainSendKey` (roles are symmetric).
 
-K = 50 and T = 3600 s are the spec values. After at most 50 messages or 1 hour of idle followed by a message, a compromised ratchet state is automatically healed.
+K = 50 and T = 3600 s are the spec values. After at most 50 messages or 1 hour of idle followed by a message, both the root key and all chain keys are healed. An attacker who holds the old RK but missed the `kem_ss` cannot recover RK_new or any subsequent message keys.
 
 #### 9.4.2. Out-of-Order Delivery
 
@@ -598,39 +659,68 @@ Effective entropy: approximately 30 bits (10^9 possible 9-digit prefixes). This 
 
 The Luhn check digit enables the UI to detect simple transcription errors before attempting the PAKE.
 
-### 10.2. CPace Construction (Simplified Curve25519 Variant)
+### 10.2. CPace Construction
 
-CPace (draft-irtf-cfrg-cpace) is instantiated over Curve25519. This is a simplified variant that integrates directly with wolfCrypt's existing X25519 primitives.
+x3dhpq uses CPace as defined in draft-irtf-cfrg-cpace-13, instantiated with X25519 and the Elligator2 hash-to-curve from RFC 9380 §6.7.2 (`curve25519_XMD:SHA-512_ELL2_NU_`, the single-field-element non-uniform variant). The generator point G is derived from the password and full transcript context via Elligator2, ensuring G has unknown discrete log with respect to the standard X25519 basepoint — the property CPace requires. The `_NU_` suite is used instead of `_RO_` because `_RO_` requires Curve25519 point addition (two Elligator2 evaluations followed by Montgomery-ladder point add), adding complexity with no security benefit for CPace — both variants produce a point with unknown DLOG.
 
-**Generator derivation:**
+**Transcript binding (`CI`):**
 
-```
-generator_scalar = SHA-512("CPace-X25519-Generator-v1" || password || sid || adA || adB)[:32]
-generator_scalar[0]  &= 248    // clamp per RFC 7748
-generator_scalar[31] &= 127
-generator_scalar[31] |= 64
-g = X25519.DerivePublic(generator_scalar)
-```
-
-**PAKE1 message (each party):** a random scalar `y` (clamped), `Y = X25519.ScalarMult(y, g)` (32 bytes).
-
-**Session key derivation:**
+Both sides assemble an identical transcript before the PAKE exchange:
 
 ```
-K         = X25519.ScalarMult(y, peer_Y)
-PRK       = HKDF-Extract(salt=sid, ikm=K)
-sessionKey = HKDF-Expand(PRK, info="CPace-SessionKey", len=32)
+transcript = pack(
+    "X3DHPQ-CPace-Transcript-v1\0",
+    bare_jid,
+    full_jid_initiator,
+    full_jid_responder,
+    server_domain,
+    aik_pub_initiator (or empty),
+    aik_pub_responder (or empty),
+    0x49 ('I'),   // initiator role marker
+    0x52 ('R'),   // responder role marker
+    purpose,      // e.g. "device-pairing"
+)
+```
+
+where `pack` uses `uint16-be(len) || bytes` length-prefixed concatenation for each field.
+
+**Generator derivation (Elligator2 hash-to-curve):**
+
+```
+H2C_input = pack(PRS, sid, transcript)   // length-prefixed
+G = hashToCurveX25519(H2C_input, "X3DHPQ-CPace-v1")
+    // curve25519_XMD:SHA-512_ELL2_NU_ per RFC 9380 §6.7.2
+```
+
+**PAKE1 message (each party):** a 32-byte random scalar `y` (clamped per RFC 7748), `Y = X25519ScalarMult(y, G)`.
+
+**Session key derivation (transcript-bound):**
+
+```
+K  = X25519ScalarMult(y, peer_Y)
+ma, mb = lexicographic_min(Y_self, Y_peer), lexicographic_max(Y_self, Y_peer)
+transcript_hash = SHA-512(
+    "X3DHPQ-CPace-SessionTranscript-v1\0" ||
+    uint16-be(sid_len)        || sid        ||
+    uint16-be(transcript_len) || transcript ||
+    uint16-be(len(ma))        || ma         ||
+    uint16-be(len(mb))        || mb
+)
+PRK        = HKDF-Extract(salt=sid, ikm=K || transcript_hash)
+sessionKey = HKDF-Expand(PRK, info="CPace-SessionKey-v1", len=32)
 ```
 
 **Confirm tags (16 bytes each, asymmetric by role):**
 
 ```
-PRK_c       = HKDF-Extract(salt=sid, ikm=sessionKey)
-confirmA    = HKDF-Expand(PRK_c, info="CPace-Confirm-A", len=16)
-confirmB    = HKDF-Expand(PRK_c, info="CPace-Confirm-B", len=16)
+PRK_c    = HKDF-Extract(salt=sid, ikm=sessionKey)
+confirmA = HKDF-Expand(PRK_c, info="CPace-ConfirmA-v1" || sid, len=16)
+confirmB = HKDF-Expand(PRK_c, info="CPace-ConfirmB-v1" || sid, len=16)
 ```
 
 Initiator (Existing, E) uses role `CPaceInitiator`; responder (New, N) uses `CPaceResponder`.
+
+Test vectors: see `internal/x3dhpqcrypto/cpace_test.go`. The `expand_message_xmd` subroutine is verified against the RFC 9380 DST and algorithm with known-good computed values. The RFC 9380 J.6 published test vectors target the `_RO_` (two-field-element) suite; this implementation uses `_NU_` (one field element) and includes computed vectors for cross-implementation verification. draft-irtf-cfrg-cpace-13 does not publish stable X25519 PAKE test vectors as of April 2026; `TestCPaceDraftVectors` is skipped pending their publication.
 
 ### 10.3. 9-Step FSM
 

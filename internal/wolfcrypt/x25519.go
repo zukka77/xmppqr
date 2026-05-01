@@ -8,9 +8,10 @@ package wolfcrypt
 #include <stdlib.h>
 #include <string.h>
 
-// wc_curve25519_set_rng is compiled in the system wolfSSL (WOLFSSL_CURVE25519_BLINDING)
-// but not exposed in dev headers; declare it manually.
-int wc_curve25519_set_rng(curve25519_key* key, WC_RNG* rng);
+// wc_curve25519_set_rng was needed when wolfSSL was built with
+// WOLFSSL_CURVE25519_BLINDING. The current Debian package (5.9.1, 2026-05-01)
+// is built without that flag, so the symbol no longer exists. We omit the
+// call entirely; shared-secret derivation works without per-key RNG blinding.
 
 // Computes pub = priv * basepoint for a clamped 32-byte private scalar.
 static int x25519_derive_public(const unsigned char* priv, unsigned char* pub) {
@@ -47,8 +48,7 @@ static int x25519_shared(WC_RNG* rng, const unsigned char* priv, const unsigned 
     if (!privKey || !pubKey) { free(privKey); free(pubKey); return -1; }
     wc_curve25519_init(privKey);
     wc_curve25519_init(pubKey);
-    // Set blinding RNG (required when WOLFSSL_CURVE25519_BLINDING is compiled in)
-    wc_curve25519_set_rng(privKey, rng);
+    (void)rng;
     int r = wc_curve25519_import_private(priv, 32, privKey);
     if (r == 0) r = wc_curve25519_import_public(peerPub, 32, pubKey);
     if (r == 0) {
