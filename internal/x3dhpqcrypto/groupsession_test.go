@@ -302,6 +302,142 @@ func TestAnnouncementMarshalRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRemovedAIKAnnouncementRejected(t *testing.T) {
+	alice := mkMember(t, 1)
+	bob := mkMember(t, 2)
+	carol := mkMember(t, 3)
+	members := []*GroupMember{alice, bob, carol}
+
+	aliceSession, err := NewGroupSession("room@example.com", alice.AIKPub, 1, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobSession, err := NewGroupSession("room@example.com", bob.AIKPub, 2, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	carolSession, err := NewGroupSession("room@example.com", carol.AIKPub, 3, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = carolSession
+
+	aliceSession.RemoveMember(carol.AIKPub)
+	bobSession.RemoveMember(carol.AIKPub)
+
+	carolAnn := carolSession.AnnounceSenderChain()
+	err = bobSession.AcceptSenderChain(carolAnn)
+	if !errors.Is(err, ErrAnnouncementFromRemovedMember) {
+		t.Fatalf("expected ErrAnnouncementFromRemovedMember, got %v", err)
+	}
+	evts := bobSession.Events()
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 security event, got %d", len(evts))
+	}
+	if evts[0].Kind != SecurityEventAnnouncementFromRemoved {
+		t.Fatalf("expected SecurityEventAnnouncementFromRemoved, got %v", evts[0].Kind)
+	}
+}
+
+func TestRemovedAIKMessageDetected(t *testing.T) {
+	alice := mkMember(t, 1)
+	bob := mkMember(t, 2)
+	members := []*GroupMember{alice, bob}
+
+	aliceSession, err := NewGroupSession("room@example.com", alice.AIKPub, 1, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobSession, err := NewGroupSession("room@example.com", bob.AIKPub, 2, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ann := aliceSession.AnnounceSenderChain()
+	if err := bobSession.AcceptSenderChain(ann); err != nil {
+		t.Fatal(err)
+	}
+
+	bobSession.RemoveMember(alice.AIKPub)
+
+	header, ct, err := aliceSession.Encrypt([]byte("post-removal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = bobSession.Decrypt(alice.AIKPub, header, ct)
+	if !errors.Is(err, ErrMessageFromRemovedMember) {
+		t.Fatalf("expected ErrMessageFromRemovedMember, got %v", err)
+	}
+	evts := bobSession.Events()
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 security event, got %d", len(evts))
+	}
+	if evts[0].Kind != SecurityEventMessageFromRemoved {
+		t.Fatalf("expected SecurityEventMessageFromRemoved, got %v", evts[0].Kind)
+	}
+}
+
+func TestEventsClearedAfterRead(t *testing.T) {
+	alice := mkMember(t, 1)
+	bob := mkMember(t, 2)
+	members := []*GroupMember{alice, bob}
+
+	bobSession, err := NewGroupSession("room@example.com", bob.AIKPub, 2, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobSession.RemoveMember(alice.AIKPub)
+
+	aliceSession, _ := NewGroupSession("room@example.com", alice.AIKPub, 1, members)
+	header, ct, _ := aliceSession.Encrypt([]byte("x"))
+	bobSession.Decrypt(alice.AIKPub, header, ct)
+
+	first := bobSession.Events()
+	if len(first) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(first))
+	}
+	second := bobSession.Events()
+	if len(second) != 0 {
+		t.Fatalf("expected 0 events after drain, got %d", len(second))
+	}
+}
+
+func TestRemovedAIKReinstateRequiresAddMember(t *testing.T) {
+	alice := mkMember(t, 1)
+	bob := mkMember(t, 2)
+	members := []*GroupMember{alice, bob}
+
+	bobSession, err := NewGroupSession("room@example.com", bob.AIKPub, 2, members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobSession.RemoveMember(alice.AIKPub)
+
+	if !bobSession.IsRemoved(alice.AIKPub) {
+		t.Fatal("alice should be removed")
+	}
+
+	aliceSession, _ := NewGroupSession("room@example.com", alice.AIKPub, 1, members)
+	header, ct, _ := aliceSession.Encrypt([]byte("sneaky"))
+	bobSession.Decrypt(alice.AIKPub, header, ct)
+
+	evtsBefore := bobSession.Events()
+	if len(evtsBefore) != 1 || evtsBefore[0].Kind != SecurityEventMessageFromRemoved {
+		t.Fatalf("expected 1 MessageFromRemoved event before re-add, got %v", evtsBefore)
+	}
+
+	bobSession.AddMember(alice)
+
+	if bobSession.IsRemoved(alice.AIKPub) {
+		t.Fatal("alice should no longer be removed after AddMember")
+	}
+
+	evtsAfter := bobSession.Events()
+	if len(evtsAfter) != 0 {
+		t.Fatalf("expected 0 events after Events() drain, got %d", len(evtsAfter))
+	}
+}
+
 func TestEpochMismatchRejected(t *testing.T) {
 	alice := mkMember(t, 1)
 	bob := mkMember(t, 2)

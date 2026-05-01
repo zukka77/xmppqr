@@ -243,16 +243,16 @@ func (oldAIK *AccountIdentityKey) ApplyRotation(prev *AuditEntry, reason string,
 type RotationTrustPolicy int
 
 const (
-	RotationTrustWarnAccept RotationTrustPolicy = iota
-	RotationTrustStrict
+	RotationTrustStrict     RotationTrustPolicy = iota
+	RotationTrustWarnAccept
 )
 
 func ShouldAcceptRotation(rp *RotationPointer, policy RotationTrustPolicy) (accept, requireReverify bool, err error) {
 	if err := rp.Verify(); err != nil {
 		return false, false, ErrRotationBadSig
 	}
-	if policy == RotationTrustStrict {
-		return false, true, nil
+	if policy == RotationTrustWarnAccept {
+		return true, true, nil
 	}
-	return true, true, nil
+	return false, true, nil
 }

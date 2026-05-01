@@ -20,7 +20,7 @@ func runRecover() error {
 	origFP := origAIK.Public().Fingerprint()
 	fmt.Printf("  AIK_orig fp: %s\n", origFP)
 
-	passphrase := []byte("correct-horse-battery-staple")
+	passphrase := []byte("Correct-Horse-Battery-Staple42")
 	sealed, err := x3dhpqcrypto.SealAIK(origAIK, passphrase)
 	if err != nil {
 		return fmt.Errorf("SealAIK: %w", err)
@@ -160,23 +160,23 @@ func runRecover() error {
 		return fmt.Errorf("NewRotation for trust test: %w", err)
 	}
 
-	accept, requireReverify, err := x3dhpqcrypto.ShouldAcceptRotation(rp, x3dhpqcrypto.RotationTrustWarnAccept)
-	if err != nil {
-		return fmt.Errorf("WarnAccept: %w", err)
-	}
-	if !accept || !requireReverify {
-		return fmt.Errorf("WarnAccept: expected accept=true requireReverify=true, got %v %v", accept, requireReverify)
-	}
-	fmt.Printf("  WarnAccept: rotation accepted, requireReverify=true ✓\n")
-
-	accept2, requireReverify2, err := x3dhpqcrypto.ShouldAcceptRotation(rp, x3dhpqcrypto.RotationTrustStrict)
+	accept, requireReverify, err := x3dhpqcrypto.ShouldAcceptRotation(rp, x3dhpqcrypto.RotationTrustStrict)
 	if err != nil {
 		return fmt.Errorf("Strict: %w", err)
 	}
-	if accept2 || !requireReverify2 {
-		return fmt.Errorf("Strict: expected accept=false requireReverify=true, got %v %v", accept2, requireReverify2)
+	if accept || !requireReverify {
+		return fmt.Errorf("Strict (default): expected accept=false requireReverify=true, got %v %v", accept, requireReverify)
 	}
-	fmt.Printf("  Strict:     rotation refused, requireReverify=true ✓\n")
+	fmt.Printf("  Strict (default): rotation refused, requireReverify=true ✓\n")
+
+	accept2, requireReverify2, err := x3dhpqcrypto.ShouldAcceptRotation(rp, x3dhpqcrypto.RotationTrustWarnAccept)
+	if err != nil {
+		return fmt.Errorf("WarnAccept: %w", err)
+	}
+	if !accept2 || !requireReverify2 {
+		return fmt.Errorf("WarnAccept: expected accept=true requireReverify=true, got %v %v", accept2, requireReverify2)
+	}
+	fmt.Printf("  WarnAccept (self-recovery): rotation accepted, requireReverify=true ✓\n")
 
 	tampered := *rp
 	sig := make([]byte, len(rp.Signature))
@@ -191,7 +191,32 @@ func runRecover() error {
 	}
 	fmt.Printf("  Tampered signature: refused under both policies ✓\n")
 
-	fmt.Println("\nrecover: OK — backup, paper-key, rotation, re-cert, trust policy verified")
+	fmt.Println("\n=== Phase 6: audit chain on recovery ===")
+
+	recoverAIK, err := x3dhpqcrypto.GenerateAccountIdentity()
+	if err != nil {
+		return fmt.Errorf("generate recovery AIK: %w", err)
+	}
+	recoverBlob, err := x3dhpqcrypto.SealAIK(recoverAIK, passphrase)
+	if err != nil {
+		return fmt.Errorf("SealAIK for audit demo: %w", err)
+	}
+	recoveryOpts := x3dhpqcrypto.RecoverOptions{
+		PrevAuditEntry: nil,
+		DeviceCount:    1,
+		Timestamp:      time.Now().Unix(),
+	}
+	restoredAIK, auditEntry, err := x3dhpqcrypto.OpenAIKAndRecord(recoverBlob, passphrase, recoveryOpts)
+	if err != nil {
+		return fmt.Errorf("OpenAIKAndRecord: %w", err)
+	}
+	if err := auditEntry.Verify(restoredAIK.Public()); err != nil {
+		return fmt.Errorf("audit entry verify: %w", err)
+	}
+	fmt.Printf("  Recovery audit entry action: %s ✓\n", auditEntry.Action)
+	fmt.Printf("  Audit entry verified under recovered AIK ✓\n")
+
+	fmt.Println("\nrecover: OK — backup, paper-key, rotation, re-cert, trust policy, audit verified")
 	return nil
 }
 

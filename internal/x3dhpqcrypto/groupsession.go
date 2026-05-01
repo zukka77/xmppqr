@@ -4,15 +4,48 @@ package x3dhpqcrypto
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"github.com/danielinux/xmppqr/internal/wolfcrypt"
 )
 
-var ErrUnknownSender            = errors.New("group: no receiver chain for sender")
-var ErrEpochMismatch            = errors.New("group: header epoch outside accepted range")
-var ErrAnnouncementWrongRoom    = errors.New("group: announcement room mismatch")
-var ErrAnnouncementUnknownSender = errors.New("group: announcement sender not a current member")
-var ErrGroupAEADFailure         = errors.New("group: AEAD authentication failed")
+var ErrUnknownSender                 = errors.New("group: no receiver chain for sender")
+var ErrEpochMismatch                 = errors.New("group: header epoch outside accepted range")
+var ErrAnnouncementWrongRoom         = errors.New("group: announcement room mismatch")
+var ErrAnnouncementUnknownSender     = errors.New("group: announcement sender not a current member")
+var ErrGroupAEADFailure              = errors.New("group: AEAD authentication failed")
+var ErrAnnouncementFromRemovedMember = errors.New("group: announcement from removed member")
+var ErrMessageFromRemovedMember      = errors.New("group: message from removed member")
+
+type SecurityEventKind uint8
+
+const (
+	SecurityEventNone                    SecurityEventKind = iota
+	SecurityEventMessageFromRemoved
+	SecurityEventAnnouncementFromRemoved
+	SecurityEventStaleEpoch
+)
+
+func (k SecurityEventKind) String() string {
+	switch k {
+	case SecurityEventMessageFromRemoved:
+		return "MessageFromRemoved"
+	case SecurityEventAnnouncementFromRemoved:
+		return "AnnouncementFromRemoved"
+	case SecurityEventStaleEpoch:
+		return "StaleEpoch"
+	default:
+		return fmt.Sprintf("SecurityEventKind(%d)", uint8(k))
+	}
+}
+
+type SecurityEvent struct {
+	Kind           SecurityEventKind
+	AIKFingerprint string
+	DeviceID       uint32
+	Epoch          uint32
+	Detail         string
+}
 
 type GroupMember struct {
 	AIKPub    *AccountIdentityPub
@@ -31,9 +64,12 @@ type GroupSession struct {
 	MyDeviceID uint32
 	Epoch      uint32
 
-	Members    []*GroupMember
-	MySend     *SenderChain
-	RecvChains map[recvKey]*SenderChain
+	Members     []*GroupMember
+	MySend      *SenderChain
+	RecvChains  map[recvKey]*SenderChain
+	RemovedAIKs map[string]uint32
+
+	pendingSecurityEvents []SecurityEvent
 }
 
 func NewGroupSession(roomJID string, myAIKPub *AccountIdentityPub, myDeviceID uint32, members []*GroupMember) (*GroupSession, error) {
@@ -42,13 +78,14 @@ func NewGroupSession(roomJID string, myAIKPub *AccountIdentityPub, myDeviceID ui
 		return nil, err
 	}
 	return &GroupSession{
-		RoomJID:    roomJID,
-		MyAIKPub:   myAIKPub,
-		MyDeviceID: myDeviceID,
-		Epoch:      0,
-		Members:    members,
-		MySend:     sc,
-		RecvChains: make(map[recvKey]*SenderChain),
+		RoomJID:     roomJID,
+		MyAIKPub:    myAIKPub,
+		MyDeviceID:  myDeviceID,
+		Epoch:       0,
+		Members:     members,
+		MySend:      sc,
+		RecvChains:  make(map[recvKey]*SenderChain),
+		RemovedAIKs: make(map[string]uint32),
 	}, nil
 }
 
@@ -69,6 +106,17 @@ func (g *GroupSession) AcceptSenderChain(ann *SenderChainAnnouncement) error {
 	if ann.RoomJID != g.RoomJID {
 		return ErrAnnouncementWrongRoom
 	}
+	fp := ann.SenderAIKPub.Fingerprint()
+	if _, removed := g.RemovedAIKs[fp]; removed {
+		g.pendingSecurityEvents = append(g.pendingSecurityEvents, SecurityEvent{
+			Kind:           SecurityEventAnnouncementFromRemoved,
+			AIKFingerprint: fp,
+			DeviceID:       ann.SenderDeviceID,
+			Epoch:          ann.Epoch,
+			Detail:         "announcement received after AIK removal",
+		})
+		return ErrAnnouncementFromRemovedMember
+	}
 	found := false
 	for _, m := range g.Members {
 		if m.AIKPub.Equal(ann.SenderAIKPub) {
@@ -84,7 +132,7 @@ func (g *GroupSession) AcceptSenderChain(ann *SenderChainAnnouncement) error {
 		return err
 	}
 	k := recvKey{
-		aikFP:    ann.SenderAIKPub.Fingerprint(),
+		aikFP:    fp,
 		deviceID: ann.SenderDeviceID,
 		epoch:    ann.Epoch,
 	}
@@ -125,11 +173,22 @@ func (g *GroupSession) Encrypt(plaintext []byte) (header *GroupMessageHeader, ci
 }
 
 func (g *GroupSession) Decrypt(senderAIK *AccountIdentityPub, header *GroupMessageHeader, ciphertext []byte) ([]byte, error) {
+	fp := senderAIK.Fingerprint()
+	if _, removed := g.RemovedAIKs[fp]; removed {
+		g.pendingSecurityEvents = append(g.pendingSecurityEvents, SecurityEvent{
+			Kind:           SecurityEventMessageFromRemoved,
+			AIKFingerprint: fp,
+			DeviceID:       header.SenderDeviceID,
+			Epoch:          header.Epoch,
+			Detail:         "message received after AIK removal",
+		})
+		return nil, ErrMessageFromRemovedMember
+	}
 	if header.Epoch < g.Epoch {
 		return nil, ErrEpochMismatch
 	}
 	k := recvKey{
-		aikFP:    senderAIK.Fingerprint(),
+		aikFP:    fp,
 		deviceID: header.SenderDeviceID,
 		epoch:    header.Epoch,
 	}
@@ -165,6 +224,8 @@ func (g *GroupSession) rotateEpoch() error {
 }
 
 func (g *GroupSession) AddMember(m *GroupMember) {
+	fp := m.AIKPub.Fingerprint()
+	delete(g.RemovedAIKs, fp)
 	g.Members = append(g.Members, m)
 	_ = g.rotateEpoch()
 }
@@ -185,6 +246,18 @@ func (g *GroupSession) RemoveMember(aikPub *AccountIdentityPub) {
 		}
 	}
 	_ = g.rotateEpoch()
+	g.RemovedAIKs[fp] = g.Epoch
+}
+
+func (g *GroupSession) Events() []SecurityEvent {
+	out := g.pendingSecurityEvents
+	g.pendingSecurityEvents = nil
+	return out
+}
+
+func (g *GroupSession) IsRemoved(aikPub *AccountIdentityPub) bool {
+	_, ok := g.RemovedAIKs[aikPub.Fingerprint()]
+	return ok
 }
 
 func (g *GroupSession) CurrentMembers() []*GroupMember {

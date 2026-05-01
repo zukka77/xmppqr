@@ -21,7 +21,7 @@ func TestRecoverBackupRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	pass := []byte("test-passphrase")
-	sealed, err := x3dhpqcrypto.SealAIK(aik, pass)
+	sealed, err := x3dhpqcrypto.SealAIKAllowWeak(aik, pass)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,11 +39,11 @@ func TestRecoverWrongPassphrase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealed, err := x3dhpqcrypto.SealAIK(aik, []byte("x"))
+	sealed, err := x3dhpqcrypto.SealAIKAllowWeak(aik, []byte("abcdefgh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = x3dhpqcrypto.OpenAIK(sealed, []byte("y"))
+	_, err = x3dhpqcrypto.OpenAIK(sealed, []byte("abcdefgi"))
 	if !errors.Is(err, x3dhpqcrypto.ErrRecoveryBadPassphrase) {
 		t.Fatalf("expected ErrRecoveryBadPassphrase, got %v", err)
 	}
@@ -55,7 +55,7 @@ func TestRecoverPaperKeyRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	pass := []byte("paper-key-test")
-	sealed, err := x3dhpqcrypto.SealAIK(aik, pass)
+	sealed, err := x3dhpqcrypto.SealAIKAllowWeak(aik, pass)
 	if err != nil {
 		t.Fatal(err)
 	}

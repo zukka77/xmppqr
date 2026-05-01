@@ -35,14 +35,29 @@ const (
 )
 
 var (
-	ErrRecoveryBadPassphrase  = errors.New("recovery: passphrase did not unlock blob")
-	ErrRecoveryMalformed      = errors.New("recovery: malformed sealed blob")
-	ErrRecoveryParamsInsecure = errors.New("recovery: scrypt params below minimum")
+	ErrRecoveryBadPassphrase   = errors.New("recovery: passphrase did not unlock blob")
+	ErrRecoveryMalformed       = errors.New("recovery: malformed sealed blob")
+	ErrRecoveryParamsInsecure  = errors.New("recovery: scrypt params below minimum")
+	ErrRecoveryWeakPassphrase  = errors.New("recovery: passphrase strength below acceptable")
 )
 
 var b32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 func SealAIK(aik *AccountIdentityKey, passphrase []byte) (string, error) {
+	if EstimatePassphrase(passphrase) < PassphraseAcceptable {
+		return "", ErrRecoveryWeakPassphrase
+	}
+	return sealAIKRaw(aik, passphrase)
+}
+
+func SealAIKAllowWeak(aik *AccountIdentityKey, passphrase []byte) (string, error) {
+	if EstimatePassphrase(passphrase) == PassphraseInvalid {
+		return "", ErrRecoveryWeakPassphrase
+	}
+	return sealAIKRaw(aik, passphrase)
+}
+
+func sealAIKRaw(aik *AccountIdentityKey, passphrase []byte) (string, error) {
 	salt := make([]byte, aikRecoverySaltLen)
 	if _, err := wolfcrypt.Read(salt); err != nil {
 		return "", err
@@ -359,4 +374,29 @@ func splitPaperLines(paper string) []string {
 		}
 	}
 	return lines
+}
+
+type RecoverOptions struct {
+	PrevAuditEntry *AuditEntry
+	DeviceCount    uint16
+	Timestamp      int64
+}
+
+// OpenAIKAndRecord unseals the blob with the passphrase and emits the
+// required RecoverFromBackup audit entry. Callers MUST publish the
+// returned entry to the user's audit-chain PEP node before any further
+// protocol traffic. The bare OpenAIK may be used for in-memory tests or
+// sanity-checking a backup blob, but production recovery flows MUST go
+// through OpenAIKAndRecord.
+func OpenAIKAndRecord(blob string, passphrase []byte, opts RecoverOptions) (*AccountIdentityKey, *AuditEntry, error) {
+	aik, err := OpenAIK(blob, passphrase)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload := PayloadRecoverFromBackup(opts.Timestamp, opts.DeviceCount)
+	entry, err := aik.AppendAudit(opts.PrevAuditEntry, AuditActionRecoverFromBackup, payload, opts.Timestamp)
+	if err != nil {
+		return nil, nil, err
+	}
+	return aik, entry, nil
 }

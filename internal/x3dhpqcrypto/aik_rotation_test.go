@@ -216,6 +216,31 @@ func TestShouldAcceptRotationStrict(t *testing.T) {
 	}
 }
 
+func TestDefaultPolicyIsStrict(t *testing.T) {
+	oldAIK, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newAIK, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := oldAIK.NewRotation(newAIK.Public(), "default policy test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept, requireReverify, err := ShouldAcceptRotation(rp, RotationTrustPolicy(0))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if accept {
+		t.Fatal("zero value policy must refuse (Strict)")
+	}
+	if !requireReverify {
+		t.Fatal("expected requireReverify=true")
+	}
+}
+
 func TestShouldAcceptRotationBadSig(t *testing.T) {
 	oldAIK, err := GenerateAccountIdentity()
 	if err != nil {

@@ -21,7 +21,7 @@
 
 ## 1. Abstract
 
-This document specifies x3dhpq-over-XMPP, a protocol for end-to-end encrypted (E2EE) messaging on XMPP networks. The protocol provides post-quantum confidentiality through a hybrid construction — every pairwise session combines classical X25519 Diffie-Hellman with ML-KEM-768 (FIPS 203) key encapsulation to derive a shared root key, which is subsequently protected by a Triple Ratchet (Signal Double Ratchet augmented with periodic ML-KEM-768 checkpoints). Account-level identity is anchored in an **Account Identity Key (AIK)**, a long-term Ed25519 key. Each device holds a **Device Identity Key (DIK)** bound to the AIK by a **Device Certificate (DC)**, enabling users to verify each other once by AIK fingerprint while new devices enrol automatically via a CPace PAKE pairing protocol. An append-only **audit chain** records all device additions, removals, AIK rotations, and recovery events. Group sessions use per-device sender chains (Megolm-style) with epoch rotation on membership change. AIK backup and recovery use scrypt-derived AES-256-GCM sealed blobs optionally encoded as human-readable paper keys. The XMPP server is explicitly transport-only: it never holds keys, never decrypts content, and never inspects message envelopes.
+This document specifies x3dhpq-over-XMPP, a protocol for end-to-end encrypted (E2EE) messaging on XMPP networks. The protocol provides post-quantum confidentiality through a hybrid construction — every pairwise session combines classical X25519 Diffie-Hellman with ML-KEM-768 (FIPS 203) key encapsulation to derive a shared root key, which is subsequently protected by a Triple Ratchet (Signal Double Ratchet augmented with periodic ML-KEM-768 checkpoints). Account-level identity is anchored in an **Account Identity Key (AIK)**. In v1, the AIK is a long-term Ed25519 key; the design reserves ML-DSA-65 fields for hybrid signing once a wolfCrypt build with ML-DSA support is available. Each device holds a **Device Identity Key (DIK)** bound to the AIK by a **Device Certificate (DC)**, enabling users to verify each other once by AIK fingerprint while new devices enrol automatically via a CPace PAKE pairing protocol. An append-only **audit chain** records all device additions, removals, AIK rotations, and recovery events. Group sessions use per-device sender chains (Megolm-style) with epoch rotation on membership change. AIK backup and recovery use scrypt-derived AES-256-GCM sealed blobs optionally encoded as human-readable paper keys. The XMPP server is explicitly transport-only: it never holds keys, never decrypts content, and never inspects message envelopes.
 
 ---
 
@@ -50,7 +50,7 @@ x3dhpq-over-XMPP shares OMEMO's broad architecture: devices publish cryptographi
 
 1. **PQ hybrid key agreement**: X3DH is replaced by PQXDH, which incorporates an ML-KEM-768 encapsulation step. The root key is derived from both X25519 and KEM shared secrets (HKDF-SHA-512 throughout).
 2. **Triple Ratchet**: Signal's Double Ratchet is augmented with a Sparse PQ Ratchet (SPQR). Every K messages or after T seconds of inactivity, a fresh ML-KEM-768 encapsulation checkpoint injects entropy into the root key derivation.
-3. **Account identity**: Long-term identity is represented as an **AIK** — an Ed25519 keypair in the current implementation, with ML-DSA-65 fields reserved for future use (see §5). Bundles include a **Device Certificate** signed by the AIK instead of a bare DIK public key.
+3. **Account identity**: Long-term identity is represented as an **AIK** — an Ed25519 keypair in v1, with ML-DSA-65 fields reserved (nil) until a wolfCrypt build with ML-DSA support is integrated (see §5 and §19.3). Bundles include a **Device Certificate** signed by the AIK instead of a bare DIK public key.
 4. **Group sender keys**: Group sessions use per-device sender chains distributed pairwise, similar to Signal's group key design and Megolm.
 5. **Server role**: OMEMO servers are already transport-only in theory; this specification makes that property explicit and defines server-enforced policies.
 
@@ -61,7 +61,7 @@ The ratchet semantics and KEM checkpoint logic are adapted from Signal's SparseP
 - **PQ confidentiality at session establishment** (HNDL resistance): an adversary recording traffic today cannot decrypt it with a future CRQC.
 - **Per-user, not per-device trust**: verify once by AIK fingerprint; all devices under that AIK are transitively trusted.
 - **Frictionless new-device enrolment**: a 10-digit typed code on an existing device suffices.
-- **Deniable recovery path**: encrypted AIK backup allows account recovery on a fresh device with no involvement of other users.
+- **Self-service recovery path**: encrypted AIK backup allows account recovery on a fresh device with no involvement of other users.
 - **Audit transparency**: an append-only PEP chain lets users detect unauthorized device additions after the fact.
 - **Server opacity**: the server learns nothing about message content, session keys, or ratchet state.
 
@@ -89,7 +89,7 @@ This document uses RFC 2119 key words.
 | Term | Definition |
 |------|------------|
 | **AEAD** | Authenticated Encryption with Associated Data |
-| **AIK** | Account Identity Key — long-term Ed25519 key (ML-DSA-65 fields reserved), one per account |
+| **AIK** | Account Identity Key — long-term Ed25519 key in v1; ML-DSA-65 fields are reserved (nil) for future hybrid signing, one per account |
 | **AIK fingerprint** | BLAKE2b-160 of the canonical-encoded AIK public key, displayed as 30 hex chars in 6 groups of 5 |
 | **Audit chain** | Append-only PEP node recording AIK-signed events (add/remove device, rotate AIK, recover) |
 | **ChainKey (CK)** | Symmetric key used to advance the sending or receiving chain |
@@ -97,7 +97,8 @@ This document uses RFC 2119 key words.
 | **CRQC** | Cryptographically-Relevant Quantum Computer |
 | **DC (Device Certificate)** | AIK-signed binding of a DIK to an account, with device ID, creation time, and flags |
 | **DHR** | Diffie-Hellman Ratchet key pair (per-ratchet-step, classical X25519) |
-| **DIK** | Device Identity Key — per-device hybrid key (Ed25519 + X25519 + ML-DSA-65 reserved), never leaves the device |
+| **DIK** | Device Identity Key — per-device key (Ed25519 + X25519; ML-DSA-65 field reserved/nil in v1), never leaves the device |
+| **scrypt** | Memory-hard password-based KDF (RFC 7914); used for AIK recovery blob key derivation with N=131072, r=8, p=1 |
 | **Double Ratchet** | Signal's Double Ratchet Algorithm combining a KDF chain with a DH ratchet |
 | **E2EE** | End-to-End Encryption |
 | **Epoch** | Contiguous sender-chain segment in a group session; rotated on membership change |
@@ -112,6 +113,9 @@ This document uses RFC 2119 key words.
 | **OMEMO** | XEP-0384, the existing XMPP E2EE protocol based on Signal's Double Ratchet |
 | **OPK** | One-Time Pre-Key (classical X25519) |
 | **Paper key** | Human-readable encoding of a sealed AIK backup blob (base32, grouped, with header) |
+| **Pinned AIK** | An AIK whose fingerprint the receiver has verified out-of-band (fingerprint compare or QR scan). All DCs signed by a Pinned AIK are auto-trusted; a Pinned AIK cannot be replaced by the server without detection. |
+| **Rotated AIK** | A new AIK pointed at by a rotation pointer from a previously Pinned AIK. The new AIK has cryptographic continuity but the old AIK_priv may be compromised; the new AIK remains in Rotated state until the receiver completes fresh OOB re-verification. |
+| **Unverified AIK** | An AIK that has been observed (from the server or the devicelist) but not yet OOB-verified by the receiver. A malicious server can substitute an Unverified AIK for another. |
 | **PEP** | Personal Eventing Protocol (XEP-0163 / XEP-0060) |
 | **PQ** | Post-Quantum |
 | **Primary device** | A device that holds AIK_priv and can sign new DCs and devicelists |
@@ -153,7 +157,7 @@ All cryptographic operations MUST use the following primitives. Implementations 
 
 **KDF implementation note**: `hkdf64`, `hkdf32`, and `hkdf44` throughout the codebase use `wolfcrypt.HKDFExtract` and `wolfcrypt.HKDFExpand` which are internally SHA-512-based. When a zero-length salt is provided, the implementation substitutes a 64-byte zero salt. This matches the HKDF specification behavior.
 
-**scrypt vs Argon2id**: The recovery KDF uses scrypt (RFC 7914) rather than Argon2id. Argon2id was considered but rejected because wolfCrypt does not ship it; introducing `golang.org/x/crypto/argon2` would be the sole non-wolfCrypt crypto dependency. RFC 7914 scrypt with N=131072, r=8, p=1 provides equivalent memory-hardness for the intended use case.
+**Recovery KDF**: scrypt (RFC 7914) with N=131072 (2^17), r=8, p=1 is the sole KDF used for recovery passphrase key derivation. This provides approximately 128 MiB memory usage per attempt. All crypto goes through wolfCrypt; no external KDF library is required.
 
 ### 5.3. KDF Constructions
 
@@ -324,7 +328,7 @@ The AIK private key (`AccountIdentityKey`) holds:
 - `PubEd25519` (32 bytes): Ed25519 public key.
 - `PubMLDSA` (nil in v1): ML-DSA-65 public key, reserved.
 
-All AIK-signing operations in v1 use `wolfcrypt.Ed25519Sign(AIK.PrivEd25519, signedPart)`. When `PubMLDSA` is non-nil, an additional ML-DSA-65 signature MUST be appended, and verification MUST require both signatures to pass.
+v1 ships with Ed25519 signatures only. All AIK-signing operations use `wolfcrypt.Ed25519Sign(AIK.PrivEd25519, signedPart)`. The `PubMLDSA` field on `AccountIdentityKey` and `AccountIdentityPub` is always nil in v1. When ML-DSA-65 becomes available in a future version, hybrid signatures SHALL be computed as the concatenation `Ed25519Signature || ML-DSA-65Signature` with both required to verify, and old (Ed25519-only) certificates SHALL be rejected by clients that have negotiated v2 or later of the protocol.
 
 ### 7.2. Device Identity Key (DIK)
 
@@ -363,7 +367,7 @@ int64   created_at
 uint8   flags
 ```
 
-Verification (`dc.Verify(aikPub)`) checks the Ed25519 signature using `aikPub.PubEd25519`. A DC with an invalid signature MUST be rejected; a DC with a nil ML-DSA-65 signature is accepted in v1 (ML-DSA-65 fields are reserved).
+Verification (`dc.Verify(aikPub)`) checks the Ed25519 signature using `aikPub.PubEd25519`. A DC with an invalid Ed25519 signature MUST be rejected. In v1, the `MLDSASignature` field is always nil (the wolfCrypt build required for ML-DSA-65 has not been finalized); parsers MUST tolerate nil ML-DSA-65 fields without error. When ML-DSA-65 becomes available, the `MLDSASignature` field SHALL carry the 3309-byte ML-DSA-65 signature, and verification MUST require both signatures to pass.
 
 ### 7.4. AIK Fingerprint and Verification
 
@@ -388,6 +392,16 @@ The location of AIK_priv determines who can authorize new devices and publish si
 - Downside: a compromised primary leaks AIK_priv to an attacker. Mitigation: at-rest encryption via OS keystore (Secure Enclave / TPM / Android Keystore), combined with audit chain monitoring.
 
 The `SharePrimary` option in `PairingOptions` controls this at pairing time. The decision is per-pairing and recorded in the DC's `flags` field.
+
+### 7.6. Trust States
+
+A receiver's trust toward a peer AIK is one of three states:
+
+- **Unverified** — observed but not OOB-verified. A malicious server can substitute this AIK. Clients MUST display a clear "unverified" indicator. Senders MAY allow encryption to an Unverified AIK only with explicit user opt-in or in opportunistic-encryption modes; high-safety deployments SHOULD refuse.
+- **Pinned** — verified OOB by fingerprint compare or QR scan. All currently-listed DCs signed by this AIK are auto-trusted; future device additions are auto-trusted on observation; the audit chain provides post-hoc detection.
+- **Rotated** — a Pinned AIK signed a rotation pointer to a new AIK. The new AIK is treated under Rotated state until the user re-verifies OOB. See §12 for full handling.
+
+Trust state is per-(receiver, peer-AIK). Storage of trust state is a client concern; this XEP defines the data model but not the persistence schema.
 
 ---
 
@@ -894,14 +908,16 @@ Signature = Ed25519Sign(oldAIK.PrivEd25519, SignedPart)
 
 When a contact observes a `RotateAIK` audit entry (via +notify), the following trust policies apply:
 
-| Policy | Constant | Behavior |
-|--------|----------|----------|
-| Warn-accept (default) | `RotationTrustWarnAccept` | Verify rotation pointer signature; accept new AIK; require out-of-band re-verification; display warning. |
-| Strict | `RotationTrustStrict` | Reject all messages from the rotated account until manual re-verification. |
+| Policy | Constant | Default for | Behavior |
+|--------|----------|-------------|----------|
+| Strict | `RotationTrustStrict` (= 0, **default**) | Contact AIKs | Verify rotation pointer signature; the new AIK is marked Rotated; the protocol REFUSES to send or accept under the new AIK until the user has explicitly re-verified OOB. |
+| Warn-accept | `RotationTrustWarnAccept` | Self-recovery only | Verify rotation pointer signature; the new AIK is accepted for continued messaging; the trust state remains Rotated and the UI MUST surface a re-verification prompt. |
 
-`ShouldAcceptRotation(rp, policy)` returns `(accept bool, requireReverify bool, err error)`.
+`ShouldAcceptRotation(rp, policy)` returns `(accept bool, requireReverify bool, err error)`. For both policies, `requireReverify` is always `true` for a valid rotation pointer. For an invalid (bad signature) rotation pointer, both policies return `accept=false, requireReverify=false, err=ErrRotationBadSig`.
 
-**Security note**: The rotation pointer itself is signed by the old AIK. An attacker who has compromised the old AIK can forge a rotation pointer. Therefore, even in warn-accept mode, out-of-band re-verification of the new AIK fingerprint SHOULD be performed before fully resuming encrypted communication.
+The default policy MUST be `RotationTrustStrict` for contact AIKs. `RotationTrustWarnAccept` is acceptable only for self-recovery scenarios where the user is rotating their own primary device and there is no third-party threat model.
+
+**Security note**: An attacker who compromises AIK_priv can forge a valid rotation pointer. Cryptographic continuity is therefore not sufficient evidence of authenticity. Out-of-band re-verification is REQUIRED before the new AIK may be treated as Pinned. The `RotateAIK` audit entry is visible to all observers: detection is post-hoc, not preventive. Under `RotationTrustStrict`, the protocol refuses all messaging under the new AIK until the receiver explicitly re-verifies, ensuring that a forged rotation cannot silently extend an attacker's access.
 
 ### 12.4. Audit Chain Entry Semantics
 
@@ -1018,45 +1034,62 @@ Group presence extensions (informative):
 </x>
 ```
 
+### 13.9. Device Removal Semantics
+
+When a member is removed from a room (or a member's device is removed
+from their devicelist while they remain in the room), all currently
+joined participants MUST:
+
+1. Clear the receiver chain entry for the removed (AIK, device_id) pair.
+2. Record the AIK fingerprint in their RemovedAIKs set, paired with the
+   post-removal epoch. The set MUST be persisted alongside the room state.
+3. Stop including `<key rid='...'>` blocks for the removed device in
+   subsequent outbound stanzas. Pending queued messages addressed to the
+   removed device-id MUST be cancelled.
+4. Reject any subsequent SenderChainAnnouncement signed by the removed
+   AIK with a security event surfaced to the user. The protocol MUST NOT
+   silently install such an announcement.
+5. Reject any subsequent encrypted message whose header claims a sender
+   AIK + device_id pair in the RemovedAIKs set. Surface a security event.
+6. Ignore old prekeys (signed pre-keys, KEM pre-keys, OPKs) that were
+   published by the removed device, even if those prekeys remain in PEP
+   or MAM caches. New session establishment MUST consult the current
+   devicelist and refuse to use prekeys belonging to absent devices.
+
+Re-adding an AIK to the room (a separate AddMember call) clears its
+entry from RemovedAIKs but does NOT erase past security events. Past
+events remain in the event queue until consumed by the application.
+
+Implementations MUST surface security events through a UX channel that
+the user notices. Silent dropping of removed-member messages is NOT
+acceptable.
+
 ---
 
 ## 14. Recovery
 
-### 14.1. Encrypted AIK Backup Blob
+### 14.1. Recommended Recovery Modes
 
-The AIK private key is sealed using a user-chosen passphrase via `SealAIK(aik, passphrase)`:
+Implementations SHOULD offer paper-key (offline) recovery as the DEFAULT
+option. Server-stored encrypted backup is OPTIONAL; if offered, the UI
+SHOULD frame it as "recoverable from any device with the passphrase"
+rather than as the primary recovery flow. Paper key has the threat-model
+property that loss of the server is not catastrophic; server blob has
+the property that no physical artifact is needed.
 
-**KDF**: scrypt with N=131072, r=8, p=1 applied to the passphrase and a random 16-byte salt, producing a 32-byte KEK.
+### 14.2. Passphrase Strength
 
-**Encryption**: AES-256-GCM with a random 12-byte nonce. AAD is the header string itself.
+Sealing the AIK private key SHALL NOT proceed unless the passphrase
+meets the minimum strength threshold defined in §5 (the implementation
+exposes `PassphraseAcceptable`). Clients MAY override with explicit
+"expert mode" but MUST display a strong warning that the resulting
+blob is vulnerable to offline brute force.
 
-**Blob format** (a printable ASCII string):
+### 14.3. Server-Stored Blob
 
-```
-x3dhpqv1$N=131072,r=8,p=1$<base64-salt>$<base64-nonce>$<base64-ciphertext>
-```
-
-Opening (`OpenAIK(blob, passphrase)`): the implementation enforces minimum security parameters (N >= 65536, r >= 8, p >= 1) before attempting decryption. A wrong passphrase produces `ErrRecoveryBadPassphrase`.
-
-### 14.2. Paper Key Encoding
-
-The sealed blob can be re-encoded as a human-readable paper key for offline storage:
-
-```
-X3DHPQ-AIK-V1
-N=131072 r=8 p=1
-<base32-salt>
-<base32-nonce>
-<base32-ciphertext in groups of 4, 8 groups per line>
-```
-
-Lines 3–4 encode the 16-byte salt (26 base32 chars) and 12-byte nonce (20 base32 chars). The ciphertext line(s) encode the AES-256-GCM output in uppercase base32 (RFC 4648 §6, no padding), grouped for readability.
-
-`PaperKey(sealed string)` converts a blob to paper format. `PaperKeyDecode(paper string)` converts back. The paper key can be printed and stored physically; it is safe to store offline since the scrypt passphrase is not recorded with it.
-
-### 14.3. Server-Side Storage
-
-The sealed blob MAY be published as a PEP item at node `urn:xmppqr:x3dhpq:recovery:0` as a private (owner-only access, XEP-0060 §8.2.1) item with `id='current'`. The server MUST enforce the private node access model. This allows the user to retrieve the blob from any device logged into the account.
+When stored in PEP, the recovery blob lives in node
+`urn:xmppqr:x3dhpq:recovery:0` with whitelist access (owner only).
+Server item-cap default 32 KiB.
 
 Informative XML example:
 
@@ -1080,7 +1113,51 @@ Informative XML example:
 </iq>
 ```
 
-### 14.4. Threats This Mitigates and Does Not Mitigate
+### 14.4. Audit Chain Integration
+
+Every recovery event SHALL append an entry of action
+`AuditActionRecoverFromBackup` to the user's audit chain PEP node.
+Implementations MUST publish this entry on the same connection that
+performs the recovery, before any further protocol traffic. The entry
+records the recovery timestamp and the count of devices the recovery
+authorizes (typically 1 — the device performing the recovery).
+Other users observing the audit chain via +notify treat the entry as
+a security event: it is normal during legitimate self-recovery and
+suspicious if the user did not initiate one.
+
+### 14.5. Encrypted AIK Backup Blob
+
+The AIK private key is sealed using a user-chosen passphrase via `SealAIK(aik, passphrase)`:
+
+**KDF**: scrypt with N=131072, r=8, p=1 applied to the passphrase and a random 16-byte salt, producing a 32-byte KEK.
+
+**Encryption**: AES-256-GCM with a random 12-byte nonce. AAD is the header string itself.
+
+**Blob format** (a printable ASCII string):
+
+```
+x3dhpqv1$N=131072,r=8,p=1$<base64-salt>$<base64-nonce>$<base64-ciphertext>
+```
+
+Opening (`OpenAIK(blob, passphrase)`): the implementation enforces minimum security parameters (N >= 65536, r >= 8, p >= 1) before attempting decryption. A wrong passphrase produces `ErrRecoveryBadPassphrase`.
+
+### 14.6. Paper Key Encoding
+
+The sealed blob can be re-encoded as a human-readable paper key for offline storage:
+
+```
+X3DHPQ-AIK-V1
+N=131072 r=8 p=1
+<base32-salt>
+<base32-nonce>
+<base32-ciphertext in groups of 4, 8 groups per line>
+```
+
+Lines 3–4 encode the 16-byte salt (26 base32 chars) and 12-byte nonce (20 base32 chars). The ciphertext line(s) encode the AES-256-GCM output in uppercase base32 (RFC 4648 §6, no padding), grouped for readability.
+
+`PaperKey(sealed string)` converts a blob to paper format. `PaperKeyDecode(paper string)` converts back. The paper key can be printed and stored physically; it is safe to store offline since the scrypt passphrase is not recorded with it.
+
+### 14.7. Threats This Mitigates and Does Not Mitigate
 
 **Mitigates**:
 - Loss of the primary device (phone broken, lost, stolen but locked) — user recovers the AIK from the backup blob using their passphrase on a fresh device.
@@ -1091,6 +1168,11 @@ Informative XML example:
 - Compromise of a device with an unencrypted or weakly-encrypted blob on disk.
 - Compromise of the passphrase by a keylogger or memory-scraping attack.
 - A server-side adversary who stores the private PEP item and mounts an offline brute-force — mitigated only by passphrase strength.
+
+### 14.8. Out of Scope (This Version)
+
+- Shamir-style split recovery (multiple shares required to recover) — reserved for v1.1.
+- Hardware-backed key wrap (TPM, secure enclave) — implementation detail of the client.
 
 ---
 
@@ -1171,7 +1253,13 @@ When `DomainPolicy.X3DHPQOnlyMode` is `true`, any `<message>` stanza without a `
 </message>
 ```
 
-This is a domain-wide policy, not per-session negotiated. Legacy OMEMO-only clients cannot send messages on such a domain. Federation implications are discussed in Section 20.
+This is a domain-wide policy, not per-session negotiated. Legacy OMEMO-only clients cannot send messages on such a domain. Federation implications are discussed in Section 17.
+
+### 15.7. Downgrade Resistance
+
+Once a client has observed x3dhpq capability for a peer (via disco caps or by successfully exchanging an x3dhpq stanza), the client SHOULD persist this fact and MUST raise a UX warning if a subsequent conversation with that peer falls back to OMEMO or plaintext. The server cannot enforce this directly — clients can choose to ignore capability claims — but the visible UX event prevents silent downgrade attacks where a malicious server hides x3dhpq feature advertisements.
+
+Per-domain x3dhpq-only mode (`X3DHPQOnlyMode`) refuses delivery of plaintext-bodied messages to local users. This is the only protocol-level enforcement available; the rest is client UX.
 
 ---
 
@@ -1308,14 +1396,16 @@ A single `<message>` stanza MUST NOT carry both a `<x3dhpq>` envelope and an OME
 
 x3dhpq session state and OMEMO session state are completely independent. They share no keying material, no ratchet state, and no pre-keys. A device supporting both protocols MUST maintain separate key stores for each.
 
-### 17.4. Fall-Back Rules
+### 17.4. Federation Policy (Recommended)
 
-Clients SHOULD implement the following fall-back order:
+v1 implementations SHOULD use the following federation policy:
 
-1. If both sender and all recipient devices advertise `urn:xmppqr:x3dhpq:0`: use x3dhpq (this spec).
-2. If some recipient devices lack x3dhpq support: use OMEMO for those devices, x3dhpq for the rest. The message MUST be sent as two separate stanzas if both protocols are needed.
-3. If no recipient device supports x3dhpq: use OMEMO and warn the user.
-4. If the server is in x3dhpq-only mode: reject outgoing messages to devices that do not support x3dhpq; warn the user.
+1. Both peers advertise x3dhpq capability (`urn:xmppqr:x3dhpq:0`): use x3dhpq exclusively.
+2. One peer advertises only OMEMO: use OMEMO; mark the conversation with a "legacy encryption" indicator in the UI. The local user's UI MUST show the encryption status of every conversation, including the cipher suite in use.
+3. Neither peer advertises encryption: refuse to send for high-safety deployments; opportunistically encrypt-or-warn for general use.
+4. Per-domain x3dhpq-only mode: refuse delivery of unencrypted or OMEMO-only messages to local users.
+
+The downgrade-resistance UX guidance in §15.7 applies once capabilities have been observed for a peer.
 
 ---
 
@@ -1341,15 +1431,31 @@ The protocol does **not** defend against:
 - Physical extraction of AIK_priv from a device with compromised hardware security.
 - Traffic analysis (sender/recipient JIDs, message sizes, and timing are visible to the server).
 
-### 18.2. Forward Secrecy and Post-Compromise Security
+### 18.2. One-to-One Chat Security
 
-**Forward secrecy**: MessageKeys are derived from ChainKeys via a one-way function (HMAC-SHA-256). After a MessageKey is used and deleted, it cannot be re-derived from later ratchet state. Each DH ratchet step also overwrites the root key.
+The following guarantees apply to pairwise (1:1) sessions established via PQXDH:
 
-**Post-compromise security against a classical adversary**: the DH ratchet restores security after the first DH ratchet step following re-establishment with a party whose DH private key was not compromised.
+- **PQ-resistant session establishment**: after AIK pinning, the PQXDH root key derivation incorporates both X25519 and ML-KEM-768 shared secrets. An adversary must break both primitives to recover the session root key.
+- **Forward secrecy**: MessageKeys are derived from ChainKeys via a one-way function (HMAC-SHA-256). After a MessageKey is used and deleted, it cannot be re-derived from later ratchet state. Each DH ratchet step also overwrites the root key.
+- **Bounded post-compromise security**: security heals after (a) a KEM checkpoint that the attacker missed AND (b) a subsequent DH ratchet step. Post-compromise against a classical adversary restores at the next DH ratchet step; against a quantum adversary it restores within K=50 messages or T=3600 seconds.
+- **Replay protection**: replayed messages are rejected via the skipped-message-key cache and sequence number checks.
+- **Authenticity bound to AIK_priv**: session establishment requires verifying the peer's DC against the pinned AIK. An attacker cannot impersonate the peer without AIK_priv.
 
-**Post-compromise security against a quantum adversary** (CRQC capable of breaking X25519): the KEM checkpoints inject fresh ML-KEM-768 entropy. After at most K=50 messages or T=3600 seconds, the session key depends on `kemSS`, which a quantum adversary cannot derive without the ML-KEM-768 decapsulation key. Because ML-KEM-768 is believed to be quantum-secure, the quantum post-compromise window is bounded.
+### 18.3. Group Chat Security
 
-### 18.3. Hybrid PQ Security Argument
+Group sessions (Megolm-style sender chains) provide weaker guarantees than 1:1 sessions. Implementers and users MUST understand these limitations:
+
+**Provided guarantees**:
+- Confidentiality among current AIK members at the time of the epoch.
+- Forward secrecy via per-device sender chain advance: past message keys cannot be derived from the current chain key.
+- Forward secrecy after member removal: a removed member cannot read messages from the new epoch, because the new epoch's chain key is freshly generated and distributed only to remaining members.
+
+**Guarantees NOT provided in v1**:
+- **No post-compromise security equivalent to 1:1**: group sender keys do not have KEM checkpoints in v1. An attacker who obtains a sender chain key can derive all future message keys on that chain until the next epoch rotation.
+- **No anonymity**: every member sees every other member's AIK fingerprint and device IDs.
+- A member who retains history can decrypt all messages sent before their removal, even after they leave the group.
+
+### 18.4. Hybrid PQ Security Argument
 
 The root key derivation at session establishment:
 
@@ -1362,7 +1468,17 @@ For `rootKey` to be distinguishable from random, an adversary must distinguish t
 
 This argument holds under the standard dual-PRF model for HKDF; see the PQXDH specification and hybrid KEM literature for formal treatment.
 
-### 18.4. AIK Compromise and Rotation
+### 18.5. Threats Neither 1:1 Nor Group Protects Against
+
+The following threats are out of scope for the cryptographic guarantees of this protocol, regardless of session type:
+
+- **First-contact AIK substitution**: a malicious server can substitute an unverified peer AIK before the first contact. This is only mitigated by out-of-band fingerprint verification or a key transparency system (out of scope).
+- **Endpoint compromise**: a compromised device leaks its DIK_priv and any cached message keys. AIK_priv compromise additionally enables rogue DC issuance.
+- **Recovery passphrase brute-force**: the scrypt parameters raise the cost of offline attacks, but a weak passphrase with a server-stored blob remains vulnerable.
+- **Traffic analysis and metadata**: sender/recipient JIDs, message sizes, timing, and group membership are visible to the server.
+- **Denial of service by the server**: the server can drop, delay, or reorder messages; it can withhold bundle updates or devicelist changes.
+
+### 18.6. AIK Compromise and Rotation
 
 If AIK_priv is compromised:
 - The adversary can sign fake DCs and issue rogue devicelists.
@@ -1370,7 +1486,7 @@ If AIK_priv is compromised:
 - Recovery is via AIK rotation (Section 12), which produces a `RotateAIK` audit entry signed by the compromised AIK. This is detectable; contacts are warned.
 - After rotation, contacts MUST re-verify the new AIK fingerprint out-of-band before resuming fully trusted communication.
 
-### 18.5. Pairing Code Entropy and Online Attacks
+### 18.7. Pairing Code Entropy and Online Attacks
 
 The pairing code has approximately 30 bits of effective entropy (10^9 possible 9-digit prefixes). This entropy is sufficient under the following conditions:
 - **CPace binding**: a wrong code produces a different session key; the confirm tag mismatch is an unrecoverable failure with no partial information.
@@ -1379,14 +1495,7 @@ The pairing code has approximately 30 bits of effective entropy (10^9 possible 9
 
 Expected time to exhaust the search space online: at 10 attempts/second, 10^9 / 10 = 10^8 seconds ≈ 3 years. In practice, a single failed attempt (wrong code) causes the code to expire and a new code to be required, making systematic attacks impractical.
 
-### 18.6. Group Forward Secrecy After Removal
-
-See Section 13.6. The unconditional forward secrecy claim holds provided:
-1. The removed member is not in possession of the new epoch's chain key (they are not, since it is freshly generated).
-2. Epoch rotation occurs before the next outbound group message is sent.
-3. The new epoch's chain key is distributed only to remaining members via pairwise sessions.
-
-### 18.7. Side Channels and Constant-Time Requirements
+### 18.8. Side Channels and Constant-Time Requirements
 
 Implementations MUST use constant-time implementations of all cryptographic primitives:
 - ML-KEM-768 encapsulation and decapsulation MUST be constant-time.
@@ -1395,7 +1504,7 @@ Implementations MUST use constant-time implementations of all cryptographic prim
 
 The xmppqr project uses wolfSSL/wolfCrypt for all cryptographic operations. wolfCrypt's ML-KEM and Ed25519 implementations are constant-time by design. Implementers using other libraries MUST verify the same property. In particular, ML-DSA-65 operations (when activated) MUST also be constant-time.
 
-### 18.8. Recovery Passphrase Strength
+### 18.9. Recovery Passphrase Strength
 
 The security of the AIK recovery blob depends entirely on passphrase strength when the blob is stored server-side. scrypt N=131072, r=8, p=1 provides approximately 128 MiB memory usage per attempt, which makes GPU/ASIC brute-force attacks expensive. However:
 - A 4-word diceware passphrase (~51 bits entropy) is the practical minimum for server-stored blobs.
@@ -1436,17 +1545,7 @@ Package-level tests in `internal/x3dhpqcrypto/` cover:
 - `TestAIKRotation` — rotation pointer + ReissueDeviceCerts.
 - `TestTripleRatchet` — pairwise Triple Ratchet with KEM checkpoints.
 
-### 19.3. ML-DSA-65 Status
-
-ML-DSA-65 (FIPS 204) is **not active** in the current implementation. All ML-DSA-65 fields in AIK, DIK, DC, and devicelist wire formats are zero-length. The wolfSSL build flag dependency (`WOLFSSL_DILITHIUM` or equivalent) has not been finalized. When activated in a future version:
-
-- `AccountIdentityPub.PubMLDSA` will carry the 1952-byte ML-DSA-65 public key.
-- `DeviceCertificate.MLDSASignature` will carry the 3309-byte ML-DSA-65 signature.
-- All verification routines MUST require both Ed25519 and ML-DSA-65 signatures to pass.
-- The `hasMLDSA = 1` flag in the AIK marshal encoding signals the presence of ML-DSA-65 material.
-- Wire formats are forward-compatible: v1 parsers MUST tolerate nil ML-DSA-65 fields without error.
-
-### 19.4. Cryptographic Library
+### 19.3. Cryptographic Library
 
 xmppqr uses wolfSSL/wolfCrypt as its sole cryptographic backend. wolfCrypt provides:
 
@@ -1467,6 +1566,27 @@ xmppqr uses wolfSSL/wolfCrypt as its sole cryptographic backend. wolfCrypt provi
 | CSPRNG | `wolfcrypt.Read` |
 
 Clients not using wolfCrypt MUST ensure their chosen library implements FIPS 203 (ML-KEM) as standardized, not pre-standardization draft versions.
+
+### 19.5. ML-DSA-65 Status
+
+ML-DSA-65 (FIPS 204) is **not active** in the current implementation. All ML-DSA-65 fields in AIK, DIK, DC, and devicelist wire formats are zero-length. The wolfSSL build flag dependency (`WOLFSSL_DILITHIUM` or equivalent) has not been finalized. When activated in a future version:
+
+- `AccountIdentityPub.PubMLDSA` will carry the 1952-byte ML-DSA-65 public key.
+- `DeviceCertificate.MLDSASignature` will carry the 3309-byte ML-DSA-65 signature.
+- All verification routines MUST require both Ed25519 and ML-DSA-65 signatures to pass.
+- The `hasMLDSA = 1` flag in the AIK marshal encoding signals the presence of ML-DSA-65 material.
+- Wire formats are forward-compatible: v1 parsers MUST tolerate nil ML-DSA-65 fields without error.
+
+### 19.6. Cryptographic Review Status
+
+The construction adapts Signal's SparsePostQuantumRatchet and PQXDH but diverges in several material ways:
+
+- Triple Ratchet KEM mixing is split between immediate chain-key re-derivation and a deferred `KEMHistory` accumulator injected at the next DH ratchet step. This deviates from naive "kem_ss into RK" designs and is necessary because of the Double Ratchet's asymmetric RK update pattern.
+- CPace pairing uses RFC 9380 §6.7 Elligator2 hash-to-curve over X25519 with a richer transcript binding than the upstream draft suggests.
+- Group sender keys are Megolm-style without KEM checkpoints in v1.
+- All crypto goes through wolfCrypt; ML-DSA-65 is reserved but not yet active.
+
+The protocol therefore does **NOT** inherit Signal's published security proofs by reference. Independent cryptographic review is required before production deployment. This XEP draft is Experimental.
 
 ---
 
@@ -1537,6 +1657,142 @@ The current model trusts the server to deliver authentic devicelists and bundles
 | [DOUBLE-RATCHET] | The Double Ratchet Algorithm | https://signal.org/docs/specifications/doubleratchet/ |
 | [WOLFSSL] | wolfSSL/wolfCrypt cryptographic library | https://www.wolfssl.com/ |
 | [HPKE] | Hybrid Public Key Encryption (PQ KEM context) | https://datatracker.ietf.org/doc/rfc9180/ |
+
+---
+
+## Appendix A. Test Vectors
+
+The following test vectors are computed by the reference implementation
+(`internal/x3dhpqcrypto/testvectors_test.go`) and are locked in by Go tests.
+An external implementer can use these to validate a clean-room implementation
+of the specified constructions.
+
+All byte sequences are lowercase hex unless stated otherwise.
+
+### A.1. AIK Fingerprint Computation
+
+**Construction**: `BLAKE2b-160(AccountIdentityPub.Marshal())`, first 15 bytes
+displayed as 30 hex chars in 6 groups of 5.
+
+**Input** (`PubEd25519`, 32 bytes):
+```
+0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+```
+
+`PubMLDSA` = nil (v1).
+
+**`AccountIdentityPub.Marshal()` encoding** (35 bytes):
+```
+uint16(1)  = 0001
+uint8(0)   = 00        (hasMLDSA = 0)
+<32 bytes Ed25519 pub>
+```
+
+**Output fingerprint**:
+```
+CEC21 253B5 4FF48 ECFAB 9D737 EE8EB
+```
+
+### A.2. DeviceCertificate SignedPart
+
+**Construction**: `DeviceCertificate.SignedPart()`.
+
+**Inputs**:
+```
+Version        = 1          (uint16)
+DeviceID       = 0xDEADBEEF (uint32)
+DIKPubEd25519  = 0102...20  (32 bytes, same as A.1)
+DIKPubX25519   = 2122...40  (32 bytes: 0x21..0x40)
+DIKPubMLDSA    = nil        (len=0)
+CreatedAt      = 1714483200 (unix seconds, 2024-04-30T12:00:00Z)
+Flags          = 0x01       (primary)
+```
+
+**Output** (`SignedPart` bytes, hex):
+```
+0001deadbeef
+0020 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+0020 2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40
+0000
+000000006630f000
+01
+```
+(line breaks for readability; no embedded newlines in actual bytes)
+
+### A.3. Sender Chain Step
+
+**Construction**: `HMAC-SHA-256(CK, 0x01)` → MK; `HMAC-SHA-256(CK, 0x02)` → nextCK.
+
+**Input CK** (32 bytes):
+```
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+```
+
+**Output MK**:
+```
+790519613efaec118e63904e01475b9543b9a15c61070227d877418c8cca415e
+```
+
+**Output nextCK**:
+```
+e3593f75e832b460cfc9cdea5a65902f94d9213060090c0e00a5a74306389e2e
+```
+
+### A.4. Audit Chain Entry SignedPart
+
+**Construction**: `AuditEntry.SignedPart()`.
+
+**Inputs**:
+```
+Seq        = 7
+PrevHash   = 5555...55  (32 bytes, all 0x55)
+Action     = 1          (AuditActionAddDevice)
+Payload    = 0000012300000006deadbeef0001  (14 bytes)
+Timestamp  = 1714483200
+```
+
+**Output** (`SignedPart` hex, 83 bytes):
+```
+5833444850512d41756469742d763100
+0000000000000007
+5555555555555555555555555555555555555555555555555555555555555555
+01
+0000000e
+0000012300000006deadbeef0001
+000000006630f000
+```
+(line breaks for readability)
+
+The prefix `5833444850512d41756469742d763100` decodes to `"X3DHPQ-Audit-v1\x00"` (16 bytes).
+
+### A.5. KEM Checkpoint Mix
+
+**Construction**: `kemCheckpointMix(senderCK, kemSS, senderDH, kemCT, epoch, prevHistory)`.
+
+**Inputs**:
+```
+senderCK    = bbbb...bb  (32 bytes, all 0xBB)
+kemSS       = cccc...cc  (32 bytes, all 0xCC)
+senderDH    = 0102...20  (32 bytes, same as A.1)
+kemCT       = dddd...dd  (16 bytes, all 0xDD)
+epoch       = 42
+prevHistory = 0000...00  (32 bytes, all zero)
+```
+
+**Output newCKs**:
+```
+a69de60e57332f72590af362634ee57f3002644a7d4a6fd86b2146dcaf3d24a7
+```
+
+**Output newCKr**:
+```
+fdb1f3d1eb083c9049170245004401f1649eae82d7d14620bdd64d717c39dce2
+```
+
+**Output newHistory** (KEMHistory accumulator, 32 bytes):
+```
+3cd70ff3b328c19fb5cb767d31e3e11e8c01e2860393fadd5bb7d3e689c1e10e
+```
 
 ---
 
