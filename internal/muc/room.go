@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -34,23 +35,25 @@ const (
 var ErrNotAcceptable = errors.New("not-acceptable")
 
 type RoomConfig struct {
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	PasswordProtected bool `json:"password_protected"`
-	Password      string `json:"password"`
-	MembersOnly   bool   `json:"members_only"`
-	Moderated     bool   `json:"moderated"`
-	PersistRoom   bool   `json:"persist_room"`
-	Public        bool   `json:"public"`
-	AnonymityMode int    `json:"anonymity_mode"`
-	HistoryMax    int    `json:"history_max"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	PasswordProtected bool     `json:"password_protected"`
+	Password          string   `json:"password"`
+	MembersOnly       bool     `json:"members_only"`
+	Moderated         bool     `json:"moderated"`
+	PersistRoom       bool     `json:"persist_room"`
+	Public            bool     `json:"public"`
+	AnonymityMode     int      `json:"anonymity_mode"`
+	HistoryMax        int      `json:"history_max"`
+	AIKMembers        []string `json:"aik_members,omitempty"`
 }
 
 type Occupant struct {
-	Nick        string
-	FullJID     stanza.JID
-	Role        int
-	Affiliation int
+	Nick           string
+	FullJID        stanza.JID
+	Role           int
+	Affiliation    int
+	AIKFingerprint string
 }
 
 type ArchivedMessage struct {
@@ -142,13 +145,13 @@ func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *ro
 	nickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: occ.Nick}
 
 	for _, existing := range r.occupants {
-		presXML := buildOccupantPresence(nickJID.String(), existing.FullJID.String(), occ.Role, occ.Affiliation, false)
+		presXML := buildOccupantPresence(nickJID.String(), existing.FullJID.String(), occ.Role, occ.Affiliation, false, occ.AIKFingerprint)
 		_ = rtr.RouteToFull(ctx, existing.FullJID, presXML)
 	}
 
 	for _, existing := range r.occupants {
 		existNickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: existing.Nick}
-		presXML := buildOccupantPresence(existNickJID.String(), occ.FullJID.String(), existing.Role, existing.Affiliation, false)
+		presXML := buildOccupantPresence(existNickJID.String(), occ.FullJID.String(), existing.Role, existing.Affiliation, false, existing.AIKFingerprint)
 		_ = rtr.RouteToFull(ctx, occ.FullJID, presXML)
 	}
 
@@ -158,6 +161,7 @@ func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *ro
 	}
 
 	r.occupants[occ.Nick] = occ
+	r.recomputeAIKMembers()
 
 	histMax := r.config.HistoryMax
 	if histMax == 0 {
@@ -204,13 +208,14 @@ func (r *Room) Leave(ctx context.Context, fullJID stanza.JID, rtr *router.Router
 	}
 
 	delete(r.occupants, leaver.Nick)
+	r.recomputeAIKMembers()
 
 	nickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: leaver.Nick}
 	for _, occ := range r.occupants {
-		presXML := buildOccupantPresence(nickJID.String(), occ.FullJID.String(), leaver.Role, leaver.Affiliation, true)
+		presXML := buildOccupantPresence(nickJID.String(), occ.FullJID.String(), leaver.Role, leaver.Affiliation, true, "")
 		_ = rtr.RouteToFull(ctx, occ.FullJID, presXML)
 	}
-	presXML := buildOccupantPresence(nickJID.String(), fullJID.String(), leaver.Role, leaver.Affiliation, true)
+	presXML := buildOccupantPresence(nickJID.String(), fullJID.String(), leaver.Role, leaver.Affiliation, true, "")
 	_ = rtr.RouteToFull(ctx, fullJID, presXML)
 
 	return nil
@@ -347,7 +352,30 @@ func (r *Room) OccupantCount() int {
 	return len(r.occupants)
 }
 
-func buildOccupantPresence(from, to string, role, affiliation int, unavailable bool) []byte {
+func (r *Room) recomputeAIKMembers() {
+	seen := make(map[string]struct{})
+	for _, occ := range r.occupants {
+		if occ.AIKFingerprint != "" {
+			seen[occ.AIKFingerprint] = struct{}{}
+		}
+	}
+	members := make([]string, 0, len(seen))
+	for fp := range seen {
+		members = append(members, fp)
+	}
+	sort.Strings(members)
+	r.config.AIKMembers = members
+}
+
+func (r *Room) AIKMembers() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, len(r.config.AIKMembers))
+	copy(out, r.config.AIKMembers)
+	return out
+}
+
+func buildOccupantPresence(from, to string, role, affiliation int, unavailable bool, aikFP string) []byte {
 	p := &stanza.Presence{
 		From: from,
 		To:   to,
@@ -356,6 +384,9 @@ func buildOccupantPresence(from, to string, role, affiliation int, unavailable b
 		p.Type = stanza.PresenceUnavailable
 	}
 	xElem := buildMUCUserX(role, affiliation, "")
+	if aikFP != "" {
+		xElem = append(xElem, buildAIKElement(aikFP)...)
+	}
 	p.Children = xElem
 	raw, _ := p.Marshal()
 	return raw
@@ -370,6 +401,19 @@ func buildSelfPresence(from, to string, role, affiliation int) []byte {
 	p.Children = xElem
 	raw, _ := p.Marshal()
 	return raw
+}
+
+func buildAIKElement(fp string) []byte {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	aik := xml.StartElement{
+		Name: xml.Name{Space: nsGroup, Local: "aik"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "fp"}, Value: fp}},
+	}
+	enc.EncodeToken(aik)
+	enc.EncodeToken(aik.End())
+	enc.Flush()
+	return buf.Bytes()
 }
 
 func buildMUCUserX(role, affiliation int, realJID string) []byte {

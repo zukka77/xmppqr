@@ -9,6 +9,7 @@ const (
 	nsMUC     = "http://jabber.org/protocol/muc"
 	nsMUCUser = "http://jabber.org/protocol/muc#user"
 	nsPing    = "urn:xmpp:ping"
+	nsGroup   = "urn:xmppqr:x3dhpq:group:0"
 )
 
 type joinElement struct {
@@ -95,6 +96,28 @@ func isDiscoInfoIQ(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+func parseAIKExtension(raw []byte) string {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if se.Name.Local == "aik" && se.Name.Space == nsGroup {
+			for _, a := range se.Attr {
+				if a.Name.Local == "fp" {
+					return a.Value
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func isSelfPingIQ(payload []byte) bool {

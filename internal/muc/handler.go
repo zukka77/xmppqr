@@ -82,8 +82,9 @@ func (s *Service) handlePresence(ctx context.Context, raw []byte, from stanza.JI
 	room := s.getOrCreateRoom(ctx, to, from)
 
 	occ := &Occupant{
-		Nick:    nick,
-		FullJID: from,
+		Nick:           nick,
+		FullJID:        from,
+		AIKFingerprint: parseAIKExtension(raw),
 	}
 	return room.Join(ctx, occ, password, s.router, s.store)
 }
