@@ -12,9 +12,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -74,16 +72,15 @@ func main() {
 	if cfg.Listeners.HTTPUpload == "" {
 		cfg.Listeners.HTTPUpload = ":5443"
 	}
+	if err := requireServerCert(cfg); err != nil {
+		fatal("config: %v", err)
+	}
 
 	logger, err := xlog.New(cfg.Log)
 	if err != nil {
 		fatal("log: %v", err)
 	}
 	slog.SetDefault(logger)
-
-	if err := ensureCert(cfg); err != nil {
-		fatal("cert: %v", err)
-	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -415,35 +412,18 @@ func buildTLSContext(cfg *config.Config) (*xtls.Context, error) {
 	})
 }
 
-func ensureCert(cfg *config.Config) error {
-	if cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "" {
-		if _, err := os.Stat(cfg.TLS.CertFile); err == nil {
-			if _, err := os.Stat(cfg.TLS.KeyFile); err == nil {
-				return nil
-			}
-		}
+func requireServerCert(cfg *config.Config) error {
+	if cfg.TLS.CertFile == "" {
+		return errors.New("tls.cert_file is required")
 	}
-	dir := filepath.Join(os.TempDir(), "xmppqrd-dev-cert")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	if cfg.TLS.KeyFile == "" {
+		return errors.New("tls.key_file is required")
 	}
-	cfg.TLS.CertFile = filepath.Join(dir, "cert.pem")
-	cfg.TLS.KeyFile = filepath.Join(dir, "key.pem")
-	if _, err := os.Stat(cfg.TLS.CertFile); err == nil {
-		if _, err := os.Stat(cfg.TLS.KeyFile); err == nil {
-			return nil
-		}
+	if _, err := os.Stat(cfg.TLS.CertFile); err != nil {
+		return fmt.Errorf("tls.cert_file: %w", err)
 	}
-	cmd := exec.Command("openssl", "req",
-		"-x509", "-newkey", "rsa:2048", "-nodes",
-		"-days", "30",
-		"-subj", "/CN="+cfg.Server.Domain,
-		"-keyout", cfg.TLS.KeyFile,
-		"-out", cfg.TLS.CertFile,
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("openssl: %w: %s", err, out)
+	if _, err := os.Stat(cfg.TLS.KeyFile); err != nil {
+		return fmt.Errorf("tls.key_file: %w", err)
 	}
 	return nil
 }
