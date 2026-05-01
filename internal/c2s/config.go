@@ -2,6 +2,7 @@ package c2s
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/router"
 	"github.com/danielinux/xmppqr/internal/sm"
@@ -13,6 +14,7 @@ type SessionConfig struct {
 	Stores         *storage.Stores
 	Router         *router.Router
 	ResumeStore    *sm.Store
+	ResumeTimeout  time.Duration
 	Logger         *slog.Logger
 	MaxStanzaBytes int64
 	Modules        *Modules

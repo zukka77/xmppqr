@@ -1,7 +1,9 @@
 package s2s
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -11,6 +13,8 @@ import (
 	xtls "github.com/danielinux/xmppqr/internal/tls"
 	xmldec "github.com/danielinux/xmppqr/internal/xml"
 )
+
+const nsSASL = "urn:ietf:params:xml:ns:xmpp-sasl"
 
 const (
 	nsDialback = "jabber:server:dialback"
@@ -78,9 +82,13 @@ func (p *Pool) dialPlain(ctx context.Context, host, addr string) (net.Conn, erro
 }
 
 func (p *Pool) negotiateOutbound(ctx context.Context, nc net.Conn, remoteDomain string) (*Conn, error) {
-	streamID, nc, err := p.openS2SStream(ctx, nc, remoteDomain)
+	streamID, nc, postTLSFeatures, err := p.openS2SStream(ctx, nc, remoteDomain)
 	if err != nil {
 		return nil, err
+	}
+
+	if p.mtlsEnabled && postTLSFeatures != nil && featuresHasExternal(postTLSFeatures) {
+		return p.negotiateExternal(ctx, nc, remoteDomain, streamID, postTLSFeatures)
 	}
 
 	p.mu.Lock()
@@ -104,59 +112,112 @@ func (p *Pool) negotiateOutbound(ctx context.Context, nc net.Conn, remoteDomain 
 	return newConn(remoteDomain, nc, streamID), nil
 }
 
-// openS2SStream opens the pre-TLS stream, optionally does STARTTLS, then
-// re-opens the stream over TLS. Returns the peer's stream-ID and the
-// (possibly upgraded) net.Conn.
-func (p *Pool) openS2SStream(ctx context.Context, nc net.Conn, remoteDomain string) (string, net.Conn, error) {
+func (p *Pool) negotiateExternal(ctx context.Context, nc net.Conn, remoteDomain, streamID string, _ *parsedFeatures) (*Conn, error) {
+	authMsg := fmt.Sprintf(
+		"<auth xmlns='%s' mechanism='EXTERNAL'>%s</auth>",
+		nsSASL, base64.StdEncoding.EncodeToString([]byte("=")),
+	)
+	if _, err := nc.Write([]byte(authMsg)); err != nil {
+		return nil, fmt.Errorf("s2s external: send auth: %w", err)
+	}
+
+	dec := xmldec.NewDecoder(nc)
+	start, _, err := dec.NextElement()
+	if err != nil {
+		return nil, fmt.Errorf("s2s external: read response: %w", err)
+	}
+	if start.Name.Local == "failure" {
+		return nil, fmt.Errorf("s2s external: auth failed")
+	}
+	if start.Name.Local != "success" {
+		return nil, fmt.Errorf("s2s external: unexpected element %s", start.Name.Local)
+	}
+
 	if err := sendStreamOpen(nc, p.domain, remoteDomain); err != nil {
-		return "", nil, err
+		return nil, err
+	}
+
+	dec2 := xmldec.NewDecoder(nc)
+	hdr, err := dec2.OpenStream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("s2s external: post-auth stream open: %w", err)
+	}
+	if hdr.ID != "" {
+		streamID = hdr.ID
+	}
+
+	if err := readFeatures(dec2); err != nil {
+		return nil, err
+	}
+
+	return newConn(remoteDomain, nc, streamID), nil
+}
+
+type parsedFeatures struct {
+	hasExternal bool
+	hasDialback bool
+	raw         []byte
+}
+
+func featuresHasExternal(f *parsedFeatures) bool {
+	return f != nil && f.hasExternal
+}
+
+func (p *Pool) openS2SStream(ctx context.Context, nc net.Conn, remoteDomain string) (string, net.Conn, *parsedFeatures, error) {
+	if err := sendStreamOpen(nc, p.domain, remoteDomain); err != nil {
+		return "", nil, nil, err
 	}
 
 	dec := xmldec.NewDecoder(nc)
 
 	hdr, err := dec.OpenStream(ctx)
 	if err != nil {
-		return "", nil, fmt.Errorf("s2s outbound: peer stream open: %w", err)
+		return "", nil, nil, fmt.Errorf("s2s outbound: peer stream open: %w", err)
 	}
 	streamID := hdr.ID
 
 	if err := readFeatures(dec); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	if p.skipTLS {
-		return streamID, nc, nil
+		return streamID, nc, nil, nil
 	}
 
 	if _, err := nc.Write([]byte("<starttls xmlns='" + nsTLS + "'/>")); err != nil {
-		return "", nil, fmt.Errorf("s2s outbound: send starttls: %w", err)
+		return "", nil, nil, fmt.Errorf("s2s outbound: send starttls: %w", err)
 	}
 
 	if err := waitProceed(dec); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	tcpConn, ok := nc.(*net.TCPConn)
 	if !ok {
-		return "", nil, fmt.Errorf("s2s outbound: need *net.TCPConn for TLS, got %T", nc)
+		return "", nil, nil, fmt.Errorf("s2s outbound: need *net.TCPConn for TLS, got %T", nc)
 	}
 
 	tlsConn, err := xtls.ClientHandshake(p.tlsClient, tcpConn, remoteDomain)
 	if err != nil {
-		return "", nil, fmt.Errorf("s2s outbound: TLS handshake: %w", err)
+		return "", nil, nil, fmt.Errorf("s2s outbound: TLS handshake: %w", err)
 	}
 
 	if err := sendStreamOpen(tlsConn, p.domain, remoteDomain); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	dec2 := xmldec.NewDecoder(tlsConn)
 	hdr2, err := dec2.OpenStream(ctx)
 	if err != nil {
-		return "", nil, fmt.Errorf("s2s outbound: post-TLS stream open: %w", err)
+		return "", nil, nil, fmt.Errorf("s2s outbound: post-TLS stream open: %w", err)
 	}
 
-	return hdr2.ID, tlsConn, nil
+	feats, err := readFeaturesDetailed(dec2)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	return hdr2.ID, tlsConn, feats, nil
 }
 
 func sendStreamOpen(w io.Writer, from, to string) error {
@@ -179,6 +240,45 @@ func readFeatures(dec *xmldec.Decoder) error {
 		return fmt.Errorf("s2s: expected stream:features, got %s", start.Name.Local)
 	}
 	return nil
+}
+
+func readFeaturesDetailed(dec *xmldec.Decoder) (*parsedFeatures, error) {
+	start, raw, err := dec.NextElement()
+	if err != nil {
+		return nil, fmt.Errorf("s2s: read features: %w", err)
+	}
+	if start.Name.Local != "features" {
+		return nil, fmt.Errorf("s2s: expected stream:features, got %s", start.Name.Local)
+	}
+	f := &parsedFeatures{raw: raw}
+	f.hasExternal = containsMechanism(raw, "EXTERNAL")
+	f.hasDialback = bytes.Contains(raw, []byte("dialback"))
+	return f, nil
+}
+
+func containsMechanism(raw []byte, mech string) bool {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	inMechanisms := false
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "mechanisms" {
+				inMechanisms = true
+			}
+		case xml.EndElement:
+			if t.Name.Local == "mechanisms" {
+				inMechanisms = false
+			}
+		case xml.CharData:
+			if inMechanisms && string(bytes.TrimSpace(t)) == mech {
+				return true
+			}
+		}
+	}
 }
 
 func waitProceed(dec *xmldec.Decoder) error {

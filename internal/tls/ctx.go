@@ -20,10 +20,12 @@ type ServerOptions struct {
 }
 
 type ClientOptions struct {
-	MinVersion        uint16
-	PreferPQHybrid    bool
-	ServerName        string
+	MinVersion         uint16
+	PreferPQHybrid     bool
+	ServerName         string
 	InsecureSkipVerify bool
+	CertPEM            []byte
+	KeyPEM             []byte
 }
 
 type Context struct {
@@ -137,6 +139,21 @@ func NewClientContext(rootCAs []byte, opts ClientOptions) (*Context, error) {
 				C.wolfSSL_CTX_free(cctx)
 				return nil, wolfCtxErr(rc)
 			}
+		}
+	}
+
+	if len(opts.CertPEM) > 0 {
+		certPtr := (*C.uchar)(unsafe.Pointer(&opts.CertPEM[0]))
+		rc := C.wolfSSL_CTX_use_certificate_chain_buffer(cctx, certPtr, C.long(len(opts.CertPEM)))
+		if rc != C.WOLFSSL_SUCCESS {
+			C.wolfSSL_CTX_free(cctx)
+			return nil, wolfCtxErr(rc)
+		}
+		keyPtr := (*C.uchar)(unsafe.Pointer(&opts.KeyPEM[0]))
+		rc = C.wolfSSL_CTX_use_PrivateKey_buffer(cctx, keyPtr, C.long(len(opts.KeyPEM)), C.WOLFSSL_FILETYPE_PEM)
+		if rc != C.WOLFSSL_SUCCESS {
+			C.wolfSSL_CTX_free(cctx)
+			return nil, wolfCtxErr(rc)
 		}
 	}
 

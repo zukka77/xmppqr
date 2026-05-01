@@ -134,6 +134,9 @@ type Harness struct {
 	uploadSrv  *http.Server
 	pushRec    *recordingProvider
 	capsCache  *caps.Cache
+	resumeStore *sm.Store
+	cfgMu       sync.RWMutex
+	sessionCfg  *c2s.SessionConfig
 
 	s2sPool *s2s.Pool
 	s2sLn   *s2s.Listener
@@ -273,6 +276,7 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 	stores := memstore.New()
 	rt := router.New()
 	resumeStore := sm.NewStore(10_000)
+	rt.SetParkedStore(resumeStore)
 
 	var secret [32]byte
 	if _, err := wolfcrypt.Read(secret[:]); err != nil {
@@ -326,17 +330,35 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 		IBR:        ibr.New(stores, domain, allowIBR),
 	}
 
-	sessionCfg := c2s.SessionConfig{
+	sessionCfgPtr := &c2s.SessionConfig{
 		Domain:         domain,
 		Stores:         stores,
 		Router:         rt,
 		ResumeStore:    resumeStore,
+		ResumeTimeout:  300 * time.Second,
 		Logger:         slog.Default(),
 		MaxStanzaBytes: 1 << 20,
 		Modules:        mods,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	h := &Harness{
+		Domain:      domain,
+		tlsLn:       tlsLn,
+		startTLSLn:  startTLSLn,
+		tlsCtx:      tlsCtx,
+		stores:      stores,
+		rt:          rt,
+		carbMgr:     carbMgr,
+		cancel:      cancel,
+		uploadURL:   uploadURL,
+		uploadSrv:   uploadSrv,
+		pushRec:     pushRec,
+		capsCache:   capsCache,
+		resumeStore: resumeStore,
+		sessionCfg:  sessionCfgPtr,
+	}
 
 	go func() {
 		for {
@@ -354,7 +376,10 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 			}
 			go func() {
 				defer tc.Close()
-				s := c2s.NewSession(tc, sessionCfg)
+				h.cfgMu.RLock()
+				cfg := *sessionCfgPtr
+				h.cfgMu.RUnlock()
+				s := c2s.NewSession(tc, cfg)
 				if err := s.Run(ctx); err != nil && !errors.Is(err, io.EOF) {
 					_ = err
 				}
@@ -377,27 +402,17 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 				continue
 			}
 			go func() {
-				if err := c2s.RunSTARTTLS(ctx, tcp, tlsCtx, sessionCfg); err != nil && !errors.Is(err, io.EOF) {
+				h.cfgMu.RLock()
+				cfg := *sessionCfgPtr
+				h.cfgMu.RUnlock()
+				if err := c2s.RunSTARTTLS(ctx, tcp, tlsCtx, cfg); err != nil && !errors.Is(err, io.EOF) {
 					_ = err
 				}
 			}()
 		}
 	}()
 
-	return &Harness{
-		Domain:     domain,
-		tlsLn:      tlsLn,
-		startTLSLn: startTLSLn,
-		tlsCtx:     tlsCtx,
-		stores:     stores,
-		rt:         rt,
-		carbMgr:    carbMgr,
-		cancel:     cancel,
-		uploadURL:  uploadURL,
-		uploadSrv:  uploadSrv,
-		pushRec:    pushRec,
-		capsCache:  capsCache,
-	}
+	return h
 }
 
 func (h *Harness) TLSAddr() string {
@@ -485,6 +500,12 @@ func (h *Harness) SessionsFor(bareJID string) []router.Session {
 
 func (h *Harness) Caps() *caps.Cache {
 	return h.capsCache
+}
+
+func (h *Harness) WithResumeTimeout(d time.Duration) {
+	h.cfgMu.Lock()
+	h.sessionCfg.ResumeTimeout = d
+	h.cfgMu.Unlock()
 }
 
 func (h *Harness) AddRosterItem(t *testing.T, owner, contact string, subscription int) {

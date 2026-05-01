@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"sync/atomic"
+	"time"
 
 	xmldec "github.com/danielinux/xmppqr/internal/xml"
 	"github.com/danielinux/xmppqr/internal/csi"
@@ -39,10 +40,11 @@ type Session struct {
 	priority int32
 	avail    int32 // 1 = available
 
-	outbound chan []byte
-	smQueue  *sm.OutQueue
-	smInH    uint32 // atomic: SM inbound stanza counter (per-session, per XEP-0198)
-	csiF     *csi.Filter
+	outbound      chan []byte
+	smQueue       *sm.OutQueue
+	smInH         uint32 // atomic: SM inbound stanza counter (per-session, per XEP-0198)
+	smResumeToken string
+	csiF          *csi.Filter
 
 	initialPresenceSent bool
 
@@ -181,6 +183,38 @@ func (s *Session) Run(ctx context.Context) error {
 	defer close(s.done)
 	defer s.conn.Close()
 	return runStream(ctx, s)
+}
+
+func (s *Session) drainOutboundToQueue() {
+	for {
+		select {
+		case raw, ok := <-s.outbound:
+			if !ok {
+				return
+			}
+			_, _ = s.smQueue.Enqueue(raw)
+		default:
+			return
+		}
+	}
+}
+
+func (s *Session) parkIfResumable() {
+	if s.smQueue == nil || s.smResumeToken == "" || s.cfg.ResumeStore == nil {
+		return
+	}
+	s.drainOutboundToQueue()
+	timeout := s.cfg.ResumeTimeout
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+	state := &sm.ResumableState{
+		JID:          s.jid,
+		OutQueueTail: s.smQueue.Unacked(),
+		LastInH:      atomic.LoadUint32(&s.smInH),
+		ExpiresAt:    time.Now().Add(timeout),
+	}
+	_ = s.cfg.ResumeStore.Park(sm.ResumeToken(s.smResumeToken), state)
 }
 
 func parseMessageStart(raw []byte) (xml.StartElement, []byte, error) {

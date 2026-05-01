@@ -17,6 +17,7 @@ func runWriter(ctx context.Context, s *Session, shutdownFn func()) {
 			}
 			if _, err := s.enc.WriteRaw(raw); err != nil {
 				s.log.Error("writer: write error", "err", err)
+				_ = s.conn.Close()
 				return
 			}
 		}

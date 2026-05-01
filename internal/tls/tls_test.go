@@ -9,6 +9,30 @@ import (
 	"testing"
 )
 
+func genCert(t *testing.T, dir, cn string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	certFile := filepath.Join(dir, cn+"-cert.pem")
+	keyFile := filepath.Join(dir, cn+"-key.pem")
+	cmd := exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+		"-days", "1",
+		"-keyout", keyFile,
+		"-out", certFile,
+		"-subj", "/CN="+cn,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("openssl gen cert %s: %v: %s", cn, err, out)
+	}
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatalf("read cert %s: %v", cn, err)
+	}
+	keyPEM, err = os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatalf("read key %s: %v", cn, err)
+	}
+	return certPEM, keyPEM
+}
+
 var (
 	testCertPEM []byte
 	testKeyPEM  []byte
@@ -246,5 +270,72 @@ func TestExporter(t *testing.T) {
 
 	if !bytes.Equal(clientKey, srvRes.key) {
 		t.Errorf("exporter mismatch:\nclient: %x\nserver: %x", clientKey, srvRes.key)
+	}
+}
+
+func TestMTLSHandshake(t *testing.T) {
+	dir := t.TempDir()
+
+	srvCert, srvKey := genCert(t, dir, "server")
+	cliCert, cliKey := genCert(t, dir, "client")
+
+	srvCtx, err := NewServerContext(srvCert, srvKey, ServerOptions{
+		ClientAuth: true,
+		ClientCAs:  cliCert,
+	})
+	if err != nil {
+		t.Fatalf("server context: %v", err)
+	}
+	defer srvCtx.Close()
+
+	ln, err := Listen("tcp", "127.0.0.1:0", srvCtx)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	type srvResult struct {
+		hs  HandshakeState
+		err error
+	}
+	resCh := make(chan srvResult, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			resCh <- srvResult{err: err}
+			return
+		}
+		defer conn.Close()
+		hs := conn.(*Conn).HandshakeState()
+		resCh <- srvResult{hs: hs}
+	}()
+
+	cliCtx, err := NewClientContext(srvCert, ClientOptions{
+		CertPEM: cliCert,
+		KeyPEM:  cliKey,
+	})
+	if err != nil {
+		t.Fatalf("client context: %v", err)
+	}
+	defer cliCtx.Close()
+
+	conn, err := Dial("tcp", ln.Addr().(*net.TCPAddr).String(), cliCtx)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	clientHS := conn.HandshakeState()
+
+	res := <-resCh
+	if res.err != nil {
+		t.Fatalf("server accept: %v", res.err)
+	}
+
+	if len(res.hs.PeerCertChain) == 0 {
+		t.Fatal("server: expected peer cert chain, got none")
+	}
+	if len(clientHS.PeerCertChain) == 0 {
+		t.Fatal("client: expected peer cert chain, got none")
 	}
 }

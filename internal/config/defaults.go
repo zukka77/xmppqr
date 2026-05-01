@@ -35,6 +35,7 @@ func Defaults() *Config {
 		S2S: S2SConfig{
 			Enabled:         false,
 			DialbackEnabled: true,
+			MTLSEnabled:     false,
 		},
 	}
 }

@@ -526,6 +526,75 @@ func TestSMResumeAfterDisconnect(t *testing.T) {
 	h := NewHarness(t)
 	defer h.Close()
 	h.AddUser(t, "alice", "pw")
+	h.AddUser(t, "bob", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	token, err := a.EnableSM(true)
+	if err != nil {
+		t.Fatalf("EnableSM: %v", err)
+	}
+	if token == "" {
+		t.Fatal("expected non-empty resume token")
+	}
+
+	aliceJID := a.JID()
+
+	a.RawDisconnect()
+	time.Sleep(150 * time.Millisecond)
+
+	b := MustDial(t, h.TLSAddr(), h.Domain, "bob", "pw")
+	defer b.Close()
+
+	msg1 := fmt.Sprintf(`<message to='%s' type='chat' id='q1'><body>queued1</body></message>`, aliceJID.String())
+	msg2 := fmt.Sprintf(`<message to='%s' type='chat' id='q2'><body>queued2</body></message>`, aliceJID.String())
+	if err := b.Send([]byte(msg1)); err != nil {
+		t.Fatalf("bob send msg1: %v", err)
+	}
+	if err := b.Send([]byte(msg2)); err != nil {
+		t.Fatalf("bob send msg2: %v", err)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	a2 := h.NewClientForResume(t, "alice", "pw")
+	defer a2.Close()
+
+	if err := a2.ResumeSM(token, 0); err != nil {
+		t.Fatalf("ResumeSM: %v", err)
+	}
+
+	received := make(map[string]bool)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(received) < 2 && time.Now().Before(deadline) {
+		start, raw, rerr := a2.NextStanzaWithTimeout(500 * time.Millisecond)
+		if rerr == ErrTimeout {
+			continue
+		}
+		if rerr != nil {
+			t.Fatalf("a2 read: %v", rerr)
+		}
+		if start.Name.Local == "message" {
+			if bytes.Contains(raw, []byte("queued1")) {
+				received["queued1"] = true
+			}
+			if bytes.Contains(raw, []byte("queued2")) {
+				received["queued2"] = true
+			}
+		}
+	}
+	if !received["queued1"] {
+		t.Fatal("queued1 not delivered on resume")
+	}
+	if !received["queued2"] {
+		t.Fatal("queued2 not delivered on resume")
+	}
+}
+
+func TestSMResumeExpiresAfterTTL(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	h.WithResumeTimeout(400 * time.Millisecond)
 
 	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
 	token, err := a.EnableSM(true)
@@ -537,13 +606,22 @@ func TestSMResumeAfterDisconnect(t *testing.T) {
 	}
 
 	a.RawDisconnect()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 
 	a2 := h.NewClientForResume(t, "alice", "pw")
 	defer a2.Close()
 
-	if err := a2.ResumeSM(token, 0); err != nil {
-		t.Fatalf("ResumeSM: %v", err)
+	pkt := fmt.Sprintf(`<resume xmlns='urn:xmpp:sm:3' previd='%s' h='0'/>`, token)
+	if err := a2.Send([]byte(pkt)); err != nil {
+		t.Fatalf("send resume: %v", err)
+	}
+
+	start, _, rerr := a2.NextStanzaWithTimeout(5 * time.Second)
+	if rerr != nil {
+		t.Fatalf("read after resume: %v", rerr)
+	}
+	if start.Name.Local != "failed" {
+		t.Fatalf("expected <failed>, got <%s>", start.Name.Local)
 	}
 }
 

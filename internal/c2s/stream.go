@@ -68,7 +68,10 @@ func runStream(ctx context.Context, s *Session) error {
 
 	if s.cfg.Router != nil {
 		s.cfg.Router.Register(s)
-		defer s.cfg.Router.Unregister(s)
+		defer func() {
+			s.parkIfResumable()
+			s.cfg.Router.Unregister(s)
+		}()
 	}
 
 	writerCtx, cancelWriter := context.WithCancel(ctx)

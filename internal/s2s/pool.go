@@ -6,9 +6,17 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
 	xtls "github.com/danielinux/xmppqr/internal/tls"
+)
+
+type VerifyMode int
+
+const (
+	VerifyShared      VerifyMode = iota // verify key locally using shared secret
+	VerifyBackChannel                   // open back-channel per XEP-0220 §2.4
 )
 
 type InboundRouter interface {
@@ -42,15 +50,15 @@ type Pool struct {
 	mu    sync.RWMutex
 	conns map[string]*Conn
 
-	// streamIDs tracks the stream-ID we received from each remote (keyed by
-	// remote domain) so inbound <db:verify> can reconstruct the key.
 	streamIDs map[string]string
 
-	// pinTargets overrides DNS SRV for a domain — used in tests.
 	pinTargets map[string]string
 
-	skipTLS bool  // tests only: skip STARTTLS negotiation
-	dialer  Dialer
+	skipTLS    bool
+	mtlsEnabled bool
+	dialer      Dialer
+	verifyMode  VerifyMode
+	verifyRL    *rateLimiter
 }
 
 func New(domain string, secret []byte, tlsClientCtx *xtls.Context, inbound InboundRouter, log *slog.Logger) *Pool {
@@ -63,6 +71,8 @@ func New(domain string, secret []byte, tlsClientCtx *xtls.Context, inbound Inbou
 		conns:      make(map[string]*Conn),
 		streamIDs:  make(map[string]string),
 		pinTargets: make(map[string]string),
+		verifyMode: VerifyShared,
+		verifyRL:   newRateLimiter(10, time.Minute),
 	}
 	if tlsClientCtx != nil {
 		p.dialer = &defaultDialer{tlsCtx: tlsClientCtx}
@@ -70,12 +80,19 @@ func New(domain string, secret []byte, tlsClientCtx *xtls.Context, inbound Inbou
 	return p
 }
 
-// SetSkipTLS disables STARTTLS negotiation. Tests only — never call on production pools.
 func (p *Pool) SetSkipTLS(v bool) {
 	p.skipTLS = v
 	if v && p.dialer == nil {
 		p.dialer = &plainDialer{}
 	}
+}
+
+func (p *Pool) SetMTLS(enabled bool) {
+	p.mtlsEnabled = enabled
+}
+
+func (p *Pool) SetVerifyMode(m VerifyMode) {
+	p.verifyMode = m
 }
 
 // PinTarget overrides DNS SRV resolution for domain, forcing connections to addr ("host:port").

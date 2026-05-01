@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/sm"
 )
@@ -24,9 +25,20 @@ func handleSMEnable(ctx context.Context, s *Session, start xml.StartElement) {
 
 	var tok string
 	if resume && s.cfg.ResumeStore != nil {
-		t, err := s.cfg.ResumeStore.Issue(ctx, s.jid)
+		ttl := s.cfg.ResumeTimeout
+		if ttl <= 0 {
+			ttl = 300 * time.Second
+		}
+		t, err := s.cfg.ResumeStore.Issue(ctx, s.jid, ttl)
 		if err == nil {
 			tok = string(t)
+			s.smResumeToken = tok
+			s.cfg.ResumeStore.SetParkCallback(t, func() {
+				s.parkIfResumable()
+				if s.cfg.Router != nil {
+					s.cfg.Router.Unregister(s)
+				}
+			})
 		}
 	}
 
@@ -57,21 +69,28 @@ func handleSMResume(ctx context.Context, s *Session, start xml.StartElement) boo
 		}
 	}
 
-	jid, ok := s.cfg.ResumeStore.Lookup(sm.ResumeToken(prevID))
+	state, ok := s.cfg.ResumeStore.Take(sm.ResumeToken(prevID))
 	if !ok {
 		_, _ = s.enc.WriteRaw([]byte(fmt.Sprintf(`<failed xmlns='%s'><item-not-found xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></failed>`, nsSM)))
 		return false
 	}
 
-	s.jid = jid
-	if s.smQueue != nil {
-		s.smQueue.Ack(hVal)
-		for _, raw := range s.smQueue.Unacked() {
-			s.outbound <- raw
-		}
+	s.jid = state.JID
+	atomic.StoreUint32(&s.smInH, state.LastInH)
+	s.smResumeToken = prevID
+
+	if s.smQueue == nil {
+		s.smQueue = sm.New(512)
 	}
+	s.smQueue.Ack(hVal)
 
 	_, _ = s.enc.WriteRaw([]byte(fmt.Sprintf(`<resumed xmlns='%s' previd='%s' h='%d'/>`, nsSM, prevID, atomic.LoadUint32(&s.smInH))))
+
+	replay := append(state.OutQueueTail, state.Pending...)
+	for _, raw := range replay {
+		s.outbound <- raw
+	}
+
 	return true
 }
 

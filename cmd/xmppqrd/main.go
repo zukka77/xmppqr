@@ -104,6 +104,7 @@ func main() {
 	rt := router.New()
 	rt.SetLocalDomain(cfg.Server.Domain)
 	resumeStore := sm.NewStore(100_000)
+	rt.SetParkedStore(resumeStore)
 
 	mods, uploadBackend := buildModules(cfg, stores, rt, logger)
 
@@ -122,19 +123,53 @@ func main() {
 				fatal("s2s secret: %v", err2)
 			}
 		}
-		s2sClientCtx, err := xtls.NewClientContext(nil, xtls.ClientOptions{
+		s2sClientOpts := xtls.ClientOptions{
 			MinVersion:         0x0303,
 			PreferPQHybrid:     true,
 			InsecureSkipVerify: cfg.S2S.InsecureSkipVerify,
-		})
+		}
+		s2sTLSCtx := tlsCtx
+		if cfg.S2S.MTLSEnabled && cfg.S2S.CertFile != "" && cfg.S2S.KeyFile != "" {
+			certPEM, err := os.ReadFile(cfg.S2S.CertFile)
+			if err != nil {
+				fatal("s2s mtls cert: %v", err)
+			}
+			keyPEM, err := os.ReadFile(cfg.S2S.KeyFile)
+			if err != nil {
+				fatal("s2s mtls key: %v", err)
+			}
+			s2sClientOpts.CertPEM = certPEM
+			s2sClientOpts.KeyPEM = keyPEM
+			var clientCAs []byte
+			if cfg.S2S.ClientCAFile != "" {
+				clientCAs, err = os.ReadFile(cfg.S2S.ClientCAFile)
+				if err != nil {
+					fatal("s2s mtls ca: %v", err)
+				}
+			}
+			s2sTLSCtx, err = xtls.NewServerContext(certPEM, keyPEM, xtls.ServerOptions{
+				MinVersion:     0x0303,
+				PreferPQHybrid: cfg.TLS.PreferPQHybrid,
+				ClientAuth:     true,
+				ClientCAs:      clientCAs,
+			})
+			if err != nil {
+				fatal("s2s server tls: %v", err)
+			}
+			defer s2sTLSCtx.Close()
+		}
+		s2sClientCtx, err := xtls.NewClientContext(nil, s2sClientOpts)
 		if err != nil {
 			fatal("s2s client tls: %v", err)
 		}
 		inboundAdapter := router.NewRouterInboundAdapter(rt, logger)
 		s2sPool = s2s.New(cfg.Server.Domain, s2sSecret[:], s2sClientCtx, inboundAdapter, logger)
+		if cfg.S2S.MTLSEnabled {
+			s2sPool.SetMTLS(true)
+		}
 		rt.SetRemote(s2sPool)
 		if cfg.Listeners.S2S != "" {
-			s2sLn, err = s2s.NewListener(cfg.Listeners.S2S, s2sPool, tlsCtx, logger)
+			s2sLn, err = s2s.NewListener(cfg.Listeners.S2S, s2sPool, s2sTLSCtx, logger)
 			if err != nil {
 				fatal("s2s listener: %v", err)
 			}
@@ -165,14 +200,6 @@ func main() {
 	}()
 	logger.Info("metrics listening", "addr", cfg.Listeners.AdminPProf)
 
-	uploadSrv := &http.Server{Addr: cfg.Listeners.HTTPUpload, Handler: buildUploadMux(uploadBackend)}
-	go func() {
-		if err := uploadSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("upload server", "err", err)
-		}
-	}()
-	logger.Info("upload listening", "addr", cfg.Listeners.HTTPUpload)
-
 	sessionCfg := c2s.SessionConfig{
 		Domain:         cfg.Server.Domain,
 		Stores:         stores,
@@ -182,6 +209,20 @@ func main() {
 		MaxStanzaBytes: 1 << 20,
 		Modules:        mods,
 	}
+
+	var wsHandler *c2s.WSHandler
+	if cfg.Listeners.WebSocket != "" {
+		wsHandler = c2s.NewWSHandler(sessionCfg)
+		logger.Info("websocket handler registered on upload mux", "path", "/xmpp-websocket")
+	}
+
+	uploadSrv := &http.Server{Addr: cfg.Listeners.HTTPUpload, Handler: buildUploadMux(uploadBackend, wsHandler)}
+	go func() {
+		if err := uploadSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("upload server", "err", err)
+		}
+	}()
+	logger.Info("upload listening", "addr", cfg.Listeners.HTTPUpload)
 
 	go acceptLoop(ctx, ln, sessionCfg, logger)
 	if startTLSLn != nil {
@@ -294,10 +335,13 @@ func buildMetricsMux() http.Handler {
 	return mux
 }
 
-func buildUploadMux(backend *httpupload.DiskBackend) http.Handler {
+func buildUploadMux(backend *httpupload.DiskBackend, wsHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/upload/", backend.PutHandler())
 	mux.Handle("/download/", backend.GetHandler())
+	if wsHandler != nil {
+		mux.Handle("/xmpp-websocket", wsHandler)
+	}
 	return mux
 }
 

@@ -8,11 +8,17 @@ import (
 	"github.com/danielinux/xmppqr/internal/stanza"
 )
 
+type ParkedStore interface {
+	LookupByJIDStr(fullJID stanza.JID) (string, bool)
+	AppendByToken(token string, raw []byte) error
+}
+
 type Router struct {
 	shards      [256]*shard
 	mu          sync.RWMutex
 	localDomain string
 	remote      RemoteRouter
+	parked      ParkedStore
 }
 
 func New() *Router {
@@ -21,6 +27,12 @@ func New() *Router {
 		r.shards[i] = newShard()
 	}
 	return r
+}
+
+func (r *Router) SetParkedStore(p ParkedStore) {
+	r.mu.Lock()
+	r.parked = p
+	r.mu.Unlock()
 }
 
 func (r *Router) shardFor(bareKey string) *shard {
@@ -43,6 +55,7 @@ func (r *Router) RouteToFull(ctx context.Context, full stanza.JID, raw []byte) e
 	r.mu.RLock()
 	domain := r.localDomain
 	remote := r.remote
+	parked := r.parked
 	r.mu.RUnlock()
 
 	if domain != "" && full.Domain != domain {
@@ -59,11 +72,16 @@ func (r *Router) RouteToFull(ctx context.Context, full stanza.JID, raw []byte) e
 			return s.Deliver(ctx, raw)
 		}
 	}
+
+	if parked != nil {
+		if tok, ok := parked.LookupByJIDStr(full); ok {
+			return parked.AppendByToken(tok, raw)
+		}
+	}
+
 	return ErrNoSession
 }
 
-// SessionsFor returns a copy of all sessions registered for bareJID.
-// The returned slice is safe for the caller to iterate without holding any lock.
 func (r *Router) SessionsFor(bareJID string) []Session {
 	return r.shardFor(bareJID).get(bareJID)
 }

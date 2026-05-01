@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/sm"
 	"github.com/danielinux/xmppqr/internal/stanza"
@@ -35,8 +36,19 @@ func handleBind2(ctx context.Context, s *Session, bindRaw []byte) (string, error
 		q := sm.New(512)
 		s.smQueue = q
 		if s.cfg.ResumeStore != nil {
-			tok, err := s.cfg.ResumeStore.Issue(ctx, s.jid)
+			ttl := s.cfg.ResumeTimeout
+			if ttl <= 0 {
+				ttl = 300 * time.Second
+			}
+			tok, err := s.cfg.ResumeStore.Issue(ctx, s.jid, ttl)
 			if err == nil {
+				s.smResumeToken = string(tok)
+				s.cfg.ResumeStore.SetParkCallback(tok, func() {
+					s.parkIfResumable()
+					if s.cfg.Router != nil {
+						s.cfg.Router.Unregister(s)
+					}
+				})
 				extras.WriteString(fmt.Sprintf(`<enabled xmlns='%s' resume='true' id='%s'/>`, nsSM, string(tok)))
 			}
 		} else {
