@@ -32,8 +32,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "groupchat failed: %v\n", err)
 			os.Exit(1)
 		}
+	case "recover":
+		if err := runRecover(); err != nil {
+			fmt.Fprintf(os.Stderr, "recover failed: %v\n", err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q; usage: x3dhpq-testclient [selftest|info|groupchat]\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q; usage: x3dhpq-testclient [selftest|info|groupchat|recover]\n", cmd)
 		os.Exit(1)
 	}
 }

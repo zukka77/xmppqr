@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+// peerAIK is REQUIRED in InitiateSession and RespondSession; nil is never tolerated.
 package x3dhpqcrypto
 
 import (
@@ -68,13 +69,14 @@ func InitiateSession(
 		return nil, nil, nil, false, errors.New("x3dhpqcrypto: nil argument")
 	}
 
-	if peerAIK != nil {
-		if peer.DeviceCert == nil {
-			return nil, nil, nil, false, ErrUntrustedDevice
-		}
-		if err := peer.DeviceCert.Verify(peerAIK); err != nil {
-			return nil, nil, nil, false, err
-		}
+	if peerAIK == nil {
+		return nil, nil, nil, false, ErrUntrustedDevice
+	}
+	if peer.DeviceCert == nil {
+		return nil, nil, nil, false, ErrUntrustedDevice
+	}
+	if err := peer.DeviceCert.Verify(peerAIK); err != nil {
+		return nil, nil, nil, false, ErrUntrustedDevice
 	}
 
 	dh1, err := wolfcrypt.X25519SharedSecret(myDIK.PrivX25519, peer.SPKPub)
@@ -151,19 +153,17 @@ func RespondSession(
 	kemPreKeyPriv []byte,
 	kemCiphertext []byte,
 ) (rootKey []byte, ad []byte, err error) {
-	if peerAIK != nil {
-		if peerDC == nil {
-			return nil, nil, ErrUntrustedDevice
-		}
-		if err := peerDC.Verify(peerAIK); err != nil {
-			return nil, nil, err
-		}
+	if peerAIK == nil {
+		return nil, nil, ErrUntrustedDevice
+	}
+	if peerDC == nil {
+		return nil, nil, ErrUntrustedDevice
+	}
+	if err := peerDC.Verify(peerAIK); err != nil {
+		return nil, nil, ErrUntrustedDevice
 	}
 
-	var peerIdentityPubX25519 []byte
-	if peerDC != nil {
-		peerIdentityPubX25519 = peerDC.DIKPubX25519
-	}
+	peerIdentityPubX25519 := peerDC.DIKPubX25519
 
 	dh1, err := wolfcrypt.X25519SharedSecret(mySPKPriv, peerIdentityPubX25519)
 	if err != nil {
@@ -203,10 +203,6 @@ func RespondSession(
 	}
 
 	// AD: initiator_DIK_pub || responder_DIK_pub (symmetric with InitiateSession).
-	if peerIdentityPubX25519 != nil {
-		ad = append(peerIdentityPubX25519, myDIK.PubX25519...)
-	} else {
-		ad = myDIK.PubX25519
-	}
+	ad = append(peerIdentityPubX25519, myDIK.PubX25519...)
 	return rk, ad, nil
 }

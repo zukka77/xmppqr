@@ -43,6 +43,48 @@ func TestCountersIncrement(t *testing.T) {
 	}
 }
 
+func TestX3DHPQCountersIncrement(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+
+	m.X3DHPQBundleFetches.WithLabelValues("ok").Inc()
+	m.X3DHPQBundleFetches.WithLabelValues("error").Add(2)
+	m.X3DHPQEnvelopesIn.WithLabelValues("message").Inc()
+	m.X3DHPQEnvelopesIn.WithLabelValues("presence").Inc()
+	m.X3DHPQEnvelopesOut.WithLabelValues("message").Add(3)
+	m.X3DHPQEnvelopesOut.WithLabelValues("presence").Inc()
+	m.X3DHPQPairingAttempts.WithLabelValues("initiator", "success").Inc()
+	m.X3DHPQPairingAttempts.WithLabelValues("responder", "failure").Inc()
+	m.X3DHPQPairingAttempts.WithLabelValues("initiator", "in_progress").Add(2)
+	m.X3DHPQDeviceListPublishes.Inc()
+	m.X3DHPQAuditChainAppends.Add(5)
+	m.X3DHPQRotationsObserved.Inc()
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+
+	found := make(map[string]bool)
+	for _, mf := range mfs {
+		found[mf.GetName()] = true
+	}
+
+	for _, name := range []string{
+		"x3dhpq_bundle_fetches_total",
+		"x3dhpq_envelopes_in_total",
+		"x3dhpq_envelopes_out_total",
+		"x3dhpq_pairing_attempts_total",
+		"x3dhpq_device_list_publishes_total",
+		"x3dhpq_audit_chain_appends_total",
+		"x3dhpq_rotations_observed_total",
+	} {
+		if !found[name] {
+			t.Errorf("metric %s not found after increment", name)
+		}
+	}
+}
+
 func TestHandlerResponds200(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	New(reg)
