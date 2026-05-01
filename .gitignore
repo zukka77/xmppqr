@@ -26,3 +26,4 @@ coverage.txt
 .env.*
 *.local.yaml
 secrets/
+/x3dhpq-testclient
