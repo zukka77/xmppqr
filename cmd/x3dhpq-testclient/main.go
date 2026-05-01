@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Command spqr-testclient is a CLI for testing the SPQR Triple Ratchet.
+// Command x3dhpq-testclient is a CLI for testing the X3DHPQ Triple Ratchet.
 package main
 
 import (
@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/danielinux/xmppqr/internal/spqr"
-	"github.com/danielinux/xmppqr/internal/spqrcrypto"
+	"github.com/danielinux/xmppqr/internal/x3dhpq"
+	"github.com/danielinux/xmppqr/internal/x3dhpqcrypto"
 	"github.com/danielinux/xmppqr/internal/wolfcrypt"
 )
 
@@ -26,7 +26,7 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q; usage: spqr-testclient [selftest|info]\n", cmd)
+		fmt.Fprintf(os.Stderr, "unknown command %q; usage: x3dhpq-testclient [selftest|info]\n", cmd)
 		os.Exit(1)
 	}
 }
@@ -36,25 +36,25 @@ func runInfo() {
 	fmt.Println("KEM: ML-KEM-768 (FIPS 203)")
 	fmt.Println("Signature: Ed25519")
 	fmt.Println("Namespaces:")
-	fmt.Println("  Root:      ", spqr.NSRoot)
-	fmt.Println("  Bundle:    ", spqr.NSBundle)
-	fmt.Println("  DeviceList:", spqr.NSDeviceList)
-	fmt.Println("  Envelope:  ", spqr.NSEnvelope)
+	fmt.Println("  Root:      ", x3dhpq.NSRoot)
+	fmt.Println("  Bundle:    ", x3dhpq.NSBundle)
+	fmt.Println("  DeviceList:", x3dhpq.NSDeviceList)
+	fmt.Println("  Envelope:  ", x3dhpq.NSEnvelope)
 }
 
 func runSelfTest() error {
 	// 1. Generate identities.
-	aliceID, err := spqrcrypto.GenerateIdentity()
+	aliceID, err := x3dhpqcrypto.GenerateIdentity()
 	if err != nil {
 		return fmt.Errorf("alice identity: %w", err)
 	}
-	bobID, err := spqrcrypto.GenerateIdentity()
+	bobID, err := x3dhpqcrypto.GenerateIdentity()
 	if err != nil {
 		return fmt.Errorf("bob identity: %w", err)
 	}
 
 	// 2. Bob publishes bundle.
-	bobBundle, err := spqrcrypto.NewBundle(bobID, 1, 1)
+	bobBundle, err := x3dhpqcrypto.NewBundle(bobID, 1, 1)
 	if err != nil {
 		return fmt.Errorf("bob bundle: %w", err)
 	}
@@ -65,7 +65,7 @@ func runSelfTest() error {
 	if err != nil {
 		return fmt.Errorf("alice ephem: %w", err)
 	}
-	aliceRK, aliceAD, kemCT, _, err := spqrcrypto.InitiateSession(
+	aliceRK, aliceAD, kemCT, _, err := x3dhpqcrypto.InitiateSession(
 		aliceID, ephPriv, ephPub, bobPub,
 		bobPub.OPKs[0].ID,
 		bobPub.KEMPreKeys[0].ID,
@@ -75,7 +75,7 @@ func runSelfTest() error {
 	}
 
 	// 4. Bob runs RespondSession.
-	bobRK, bobAD, err := spqrcrypto.RespondSession(
+	bobRK, bobAD, err := x3dhpqcrypto.RespondSession(
 		bobID,
 		bobBundle.SignedPreKey.PrivX25519,
 		bobBundle.OneTimePreKeys[0].PrivX25519,
@@ -92,15 +92,15 @@ func runSelfTest() error {
 	}
 
 	// Build ratchet states.
-	bobRecvDH := spqrcrypto.PrivPub{
+	bobRecvDH := x3dhpqcrypto.PrivPub{
 		Priv: bobBundle.SignedPreKey.PrivX25519,
 		Pub:  bobBundle.SignedPreKey.PubX25519,
 	}
-	bobState, err := spqrcrypto.NewReceivingState(bobRK, bobAD, bobRecvDH)
+	bobState, err := x3dhpqcrypto.NewReceivingState(bobRK, bobAD, bobRecvDH)
 	if err != nil {
 		return fmt.Errorf("bob recv state: %w", err)
 	}
-	aliceState, err := spqrcrypto.NewSendingState(aliceRK, aliceAD, bobBundle.SignedPreKey.PubX25519)
+	aliceState, err := x3dhpqcrypto.NewSendingState(aliceRK, aliceAD, bobBundle.SignedPreKey.PubX25519)
 	if err != nil {
 		return fmt.Errorf("alice send state: %w", err)
 	}
@@ -142,12 +142,12 @@ func runSelfTest() error {
 
 	// Bob→Alice: 5 replies. Alice needs a receive state.
 	// RemoteDHPub is Alice's last known DH pub (Bob's SPK), so Bob's new DHPub triggers ratchet.
-	aliceRecv := &spqrcrypto.State{
+	aliceRecv := &x3dhpqcrypto.State{
 		RK:                 aliceState.RK,
 		SendingDH:          aliceState.SendingDH,
 		RemoteDHPub:        aliceState.RemoteDHPub,
 		AD:                 aliceState.AD,
-		MessageKeys:        make(map[spqrcrypto.SkipKey][]byte),
+		MessageKeys:        make(map[x3dhpqcrypto.SkipKey][]byte),
 		LastCheckpointTime: now,
 	}
 	// Give Bob Alice's KEM pub to send checkpoints to.

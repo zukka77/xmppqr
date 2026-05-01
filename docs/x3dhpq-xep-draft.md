@@ -12,16 +12,16 @@
 | Last Updated   | 2026-04-30                                                 |
 | Author         | xmppqr project                                             |
 | License        | AGPLv3                                                     |
-| Namespace      | urn:xmppqr:spqr:0                                          |
+| Namespace      | urn:xmppqr:x3dhpq:0                                          |
 | Dependencies   | XEP-0163 (PEP), XEP-0060 (PubSub), RFC 6120/6121          |
 
 ---
 
-# XEP-XQR: SPQR-over-XMPP (Sparse Post-Quantum Ratchet for XMPP End-to-End Encryption)
+# XEP-XQR: X3DHPQ-over-XMPP (X3DH-PQ Triple Ratchet for XMPP End-to-End Encryption)
 
 ## 1. Abstract
 
-This document specifies SPQR-over-XMPP, a protocol for end-to-end encrypted (E2EE) messaging on XMPP networks using the Sparse Post-Quantum Ratchet (SPQR) as defined by Signal. The protocol provides post-quantum confidentiality through a hybrid construction: every session combines classical X25519 Elliptic-Curve Diffie-Hellman with ML-KEM-768 (FIPS 203) key encapsulation to derive a shared root key. Long-term identity uses hybrid ML-DSA-65 + Ed25519 signatures. The result is a "Triple Ratchet" — Signal's Double Ratchet augmented with periodic KEM checkpoints — that retains both forward secrecy and post-compromise security under a quantum-capable adversary. The XMPP server is explicitly transport-only: it never holds keys, never decrypts content, and never inspects message envelopes.
+This document specifies X3DHPQ-over-XMPP, a protocol for end-to-end encrypted (E2EE) messaging on XMPP networks using the X3DH-PQ Triple Ratchet construction, inspired by Signal's SPQR (Sparse Post-Quantum Ratchet). The protocol provides post-quantum confidentiality through a hybrid construction: every session combines classical X25519 Elliptic-Curve Diffie-Hellman with ML-KEM-768 (FIPS 203) key encapsulation to derive a shared root key. Long-term identity uses hybrid ML-DSA-65 + Ed25519 signatures. The result is a "Triple Ratchet" — Signal's Double Ratchet augmented with periodic KEM checkpoints — that retains both forward secrecy and post-compromise security under a quantum-capable adversary. The XMPP server is explicitly transport-only: it never holds keys, never decrypts content, and never inspects message envelopes.
 
 ---
 
@@ -33,11 +33,11 @@ Store-and-forward messaging networks such as XMPP are uniquely vulnerable to har
 
 XEP-0384 OMEMO, the current XMPP E2EE standard, is based on Signal's Double Ratchet and X3DH. Both X25519 and the underlying AES-CBC+HMAC-SHA256 construction are secure against classical adversaries. However, the X3DH key agreement step and the Diffie-Hellman ratchet are broken by Shor's algorithm on a CRQC. OMEMO therefore provides no post-quantum security in its current form.
 
-This specification addresses that gap. It ports Signal's Sparse Post-Quantum Ratchet (SPQR) — a Triple Ratchet construction that mixes a classical Double Ratchet with periodic ML-KEM-768 checkpoints — to XMPP wire format. The design ensures that compromise of either the classical or post-quantum component alone is insufficient to break message confidentiality.
+This specification addresses that gap. It defines X3DHPQ-over-XMPP — a Triple Ratchet construction that mixes a classical Double Ratchet with periodic ML-KEM-768 checkpoints, adapted from Signal's SPQR design — to XMPP wire format. The design ensures that compromise of either the classical or post-quantum component alone is insufficient to break message confidentiality.
 
 ### 2.2. Relation to OMEMO (XEP-0384) and Signal's SPQR
 
-SPQR-over-XMPP shares OMEMO's broad approach: devices publish cryptographic bundles via PEP (XEP-0163 / XEP-0060), senders encrypt per-device keys, and the server routes opaque ciphertext. The key differences are:
+X3DHPQ-over-XMPP shares OMEMO's broad approach: devices publish cryptographic bundles via PEP (XEP-0163 / XEP-0060), senders encrypt per-device keys, and the server routes opaque ciphertext. The key differences are:
 
 1. **Initial key agreement**: X3DH is replaced by a post-quantum X3DH (PQXDH) variant that incorporates an ML-KEM-768 encapsulation step. The root key is derived from both an X25519 shared secret and a KEM shared secret.
 2. **Ratchet**: Signal's Double Ratchet is augmented with a Sparse PQ Ratchet (SPQR). Every K messages (or after T seconds of inactivity), a fresh ML-KEM encapsulation checkpoint is injected into the root key derivation. This provides post-compromise security against a quantum adversary.
@@ -56,10 +56,10 @@ This document uses RFC 2119 key words. The following requirements shape the desi
 - **REQ-2**: The protocol MUST provide forward secrecy: compromise of current keying material MUST NOT enable decryption of past messages.
 - **REQ-3**: The protocol MUST provide post-compromise security: after a device compromise, security MUST be automatically restored within at most K messages or T seconds (the KEM-checkpoint cadence), without user action.
 - **REQ-4**: The server MUST NOT be able to decrypt any message or derive any session key.
-- **REQ-5**: Clients that do not support SPQR-over-XMPP MUST be able to coexist on the same server without disruption.
+- **REQ-5**: Clients that do not support X3DHPQ-over-XMPP MUST be able to coexist on the same server without disruption.
 - **REQ-6**: The protocol MUST be implementable using only NIST-standardized post-quantum primitives (FIPS 203, FIPS 204).
 - **REQ-7**: Protocol overhead (bundle size, per-message overhead) MUST be bounded and documented.
-- **REQ-8**: The protocol MUST NOT weaken security relative to XEP-0384 OMEMO if only classical algorithms are available (graceful hybrid degradation is out of scope; SPQR requires PQ).
+- **REQ-8**: The protocol MUST NOT weaken security relative to XEP-0384 OMEMO if only classical algorithms are available (graceful hybrid degradation is out of scope; X3DHPQ requires PQ).
 
 ---
 
@@ -77,7 +77,7 @@ This document uses RFC 2119 key words. The following requirements shape the desi
 | **IK** | Long-term Identity Key (hybrid Ed25519 + ML-DSA-65) |
 | **KDF** | Key Derivation Function |
 | **KEM** | Key Encapsulation Mechanism |
-| **KEM-checkpoint** | A SPQR ratchet step that injects a fresh ML-KEM-768 shared secret into the root key |
+| **KEM-checkpoint** | A X3DHPQ ratchet step that injects a fresh ML-KEM-768 shared secret into the root key |
 | **ML-DSA-65** | Module-Lattice Digital Signature Algorithm (FIPS 204) at NIST security level 3 |
 | **ML-KEM-768** | Module-Lattice Key Encapsulation Mechanism (FIPS 203) at NIST security level 3 |
 | **MessageKey (MK)** | Ephemeral AEAD key derived from ChainKey for a single message |
@@ -106,7 +106,7 @@ All cryptographic operations MUST use the following primitives. Implementations 
 |-----------|------|-----------|
 | X25519 | Classical DH ratchet, SPK, OPK | RFC 7748 |
 | Ed25519 | Classical component of hybrid identity signature | RFC 8032 |
-| ML-KEM-768 | KEM component of PQXDH and SPQR checkpoints | FIPS 203 |
+| ML-KEM-768 | KEM component of PQXDH and X3DHPQ checkpoints | FIPS 203 |
 | ML-DSA-65 | PQ component of hybrid identity signature | FIPS 204 |
 
 ### 5.2. Symmetric Primitives
@@ -125,7 +125,7 @@ All cryptographic operations MUST use the following primitives. Implementations 
 RK, CK = KDF_RK(RK, dh_out)
 ```
 
-where `KDF_RK` is HKDF-SHA-256 with `RK` as the salt, `dh_out` as the input key material, and the fixed info string `"SPQR-RootKey-v0"`. Output is split 32 || 32 bytes.
+where `KDF_RK` is HKDF-SHA-256 with `RK` as the salt, `dh_out` as the input key material, and the fixed info string `"X3DHPQ-RootKey-v0"`. Output is split 32 || 32 bytes.
 
 **Hybrid root key derivation (PQXDH initial step and KEM-checkpoint steps):**
 
@@ -133,7 +133,7 @@ where `KDF_RK` is HKDF-SHA-256 with `RK` as the salt, `dh_out` as the input key 
 RK' = HKDF-SHA-256(
     salt  = RK,
     ikm   = X25519_ss || MLKEM768_ss,
-    info  = "SPQR-HybridRoot-v0"
+    info  = "X3DHPQ-HybridRoot-v0"
 )
 ```
 
@@ -152,7 +152,7 @@ MK      = HMAC-SHA-256(CK, 0x01)
 AES_key || nonce = HKDF-SHA-256(
     salt  = <zero 32 bytes>,
     ikm   = MK,
-    info  = "SPQR-MessageKey-v0",
+    info  = "X3DHPQ-MessageKey-v0",
     len   = 44   // 32-byte AES-256 key + 12-byte GCM nonce
 )
 ```
@@ -177,12 +177,12 @@ All binary cryptographic values appearing in XML MUST be encoded as standard Bas
 
 | Namespace | Purpose |
 |-----------|---------|
-| `urn:xmppqr:spqr:0` | Root / disco feature |
-| `urn:xmppqr:spqr:devicelist:0` | Device list PEP node |
-| `urn:xmppqr:spqr:bundle:0` | Device bundle PEP node |
-| `urn:xmppqr:spqr:envelope:0` | Message envelope element |
+| `urn:xmppqr:x3dhpq:0` | Root / disco feature |
+| `urn:xmppqr:x3dhpq:devicelist:0` | Device list PEP node |
+| `urn:xmppqr:x3dhpq:bundle:0` | Device bundle PEP node |
+| `urn:xmppqr:x3dhpq:envelope:0` | Message envelope element |
 
-The namespace `urn:xmppqr:spqr:0` MUST be advertised in the server's service discovery features (XEP-0030) when the server supports this specification. See Section 11.4.
+The namespace `urn:xmppqr:x3dhpq:0` MUST be advertised in the server's service discovery features (XEP-0030) when the server supports this specification. See Section 11.4.
 
 ---
 
@@ -192,14 +192,14 @@ The namespace `urn:xmppqr:spqr:0` MUST be advertised in the server's service dis
 
 Each XMPP account MAY have one or more devices. Each device is identified by a randomly generated, account-scoped, unsigned 32-bit integer `id`. Device IDs MUST be unique per account; a device MUST regenerate its ID if a collision is detected at publish time.
 
-The device list is published as a PEP item at the node `urn:xmppqr:spqr:devicelist:0` with `item id='current'`.
+The device list is published as a PEP item at the node `urn:xmppqr:x3dhpq:devicelist:0` with `item id='current'`.
 
 ```xml
 <iq type='set' from='alice@example.org/phone' id='pub-dl-1'>
   <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-    <publish node='urn:xmppqr:spqr:devicelist:0'>
+    <publish node='urn:xmppqr:x3dhpq:devicelist:0'>
       <item id='current'>
-        <devicelist xmlns='urn:xmppqr:spqr:devicelist:0'>
+        <devicelist xmlns='urn:xmppqr:x3dhpq:devicelist:0'>
           <device id='31415926'/>
           <device id='27182818'/>
         </devicelist>
@@ -209,11 +209,11 @@ The device list is published as a PEP item at the node `urn:xmppqr:spqr:deviceli
 </iq>
 ```
 
-Clients MUST subscribe to the `urn:xmppqr:spqr:devicelist:0` PEP node of their own account and of every contact. A device that appears in the device list but has no corresponding bundle (Section 7.2) MUST be treated as unavailable for session establishment.
+Clients MUST subscribe to the `urn:xmppqr:x3dhpq:devicelist:0` PEP node of their own account and of every contact. A device that appears in the device list but has no corresponding bundle (Section 7.2) MUST be treated as unavailable for session establishment.
 
 ### 7.2. Device bundle (PEP)
 
-Each device publishes a bundle at node `urn:xmppqr:spqr:bundle:0` with `item id` equal to the device ID (as a decimal string).
+Each device publishes a bundle at node `urn:xmppqr:x3dhpq:bundle:0` with `item id` equal to the device ID (as a decimal string).
 
 The bundle contains:
 
@@ -226,9 +226,9 @@ The bundle contains:
 ```xml
 <iq type='set' from='alice@example.org/phone' id='pub-bundle-1'>
   <pubsub xmlns='http://jabber.org/protocol/pubsub'>
-    <publish node='urn:xmppqr:spqr:bundle:0'>
+    <publish node='urn:xmppqr:x3dhpq:bundle:0'>
       <item id='31415926'>
-        <bundle xmlns='urn:xmppqr:spqr:bundle:0'>
+        <bundle xmlns='urn:xmppqr:x3dhpq:bundle:0'>
 
           <!-- Hybrid identity public key: 32 bytes Ed25519 || 1952 bytes ML-DSA-65 -->
           <identity>
@@ -279,7 +279,7 @@ A device SHOULD replenish `<opks>` and `<pqopks>` when the server reports the su
 The following RelaxNG compact schema is informative:
 
 ```
-namespace bundle = "urn:xmppqr:spqr:bundle:0"
+namespace bundle = "urn:xmppqr:x3dhpq:bundle:0"
 
 start = element bundle:bundle {
   element bundle:identity { text } &
@@ -365,7 +365,7 @@ pq_ss        = kem_ss_spk [|| kem_ss_opk]
 RK = HKDF-SHA-256(
     salt  = <zero 32 bytes>,
     ikm   = classical_ss || pq_ss,
-    info  = "SPQR-X3DH-PQ-v0"
+    info  = "X3DHPQ-X3DH-PQ-v0"
 )
 ```
 
@@ -409,7 +409,7 @@ This provides **forward secrecy**: past `MessageKey`s are deleted after use; a c
 
 The Sparse PQ Ratchet augments the Double Ratchet by injecting ML-KEM-768 shared secrets into the root key at intervals. The word "sparse" reflects that KEM operations are not performed on every message (unlike the DH ratchet in the Double Ratchet), because ML-KEM-768 ciphertexts (1088 bytes) and public keys (1184 bytes) are large relative to typical XMPP messages.
 
-SPQR adds a **KEM ratchet state** alongside the DH ratchet state:
+X3DHPQ adds a **KEM ratchet state** alongside the DH ratchet state:
 
 - `KEM_send_key`: the ML-KEM-768 encapsulation public key of the peer (available after the last KEM checkpoint).
 - `KEM_recv_key`: the local ML-KEM-768 decapsulation private key pair for the current epoch.
@@ -433,7 +433,7 @@ KDF_RK_PQ(RK, dh_out, kem_ss) =
     HKDF-SHA-256(
         salt  = RK,
         ikm   = dh_out || kem_ss,
-        info  = "SPQR-TripleRatchet-v0"
+        info  = "X3DHPQ-TripleRatchet-v0"
     )
     -> split 32 || 32 bytes
 ```
@@ -464,14 +464,14 @@ A KEM checkpoint message MUST include both the `kem_ct` (for the current checkpo
 
 ### 10.1. Envelope element
 
-SPQR-over-XMPP messages are carried in XMPP `<message>` stanzas. The E2EE payload is contained in a `<spqr>` element in the `urn:xmppqr:spqr:envelope:0` namespace. The outer `<message>` stanza MAY carry a `<store/>` hint (XEP-0334) but MUST NOT carry a `<body/>` element when SPQR mode is active (Section 11.1).
+X3DHPQ-over-XMPP messages are carried in XMPP `<message>` stanzas. The E2EE payload is contained in a `<x3dhpq>` element in the `urn:xmppqr:x3dhpq:envelope:0` namespace. The outer `<message>` stanza MAY carry a `<store/>` hint (XEP-0334) but MUST NOT carry a `<body/>` element when X3DHPQ mode is active (Section 11.1).
 
 ```xml
 <message from='alice@example.org/phone'
          to='bob@example.org'
          type='chat'
          id='msg-001'>
-  <spqr xmlns='urn:xmppqr:spqr:envelope:0'
+  <x3dhpq xmlns='urn:xmppqr:x3dhpq:envelope:0'
         sender_device='31415926'
         ts='2026-04-30T12:00:00Z'>
 
@@ -506,7 +506,7 @@ SPQR-over-XMPP messages are carried in XMPP `<message>` stanzas. The E2EE payloa
       <<base64-aes-256-gcm-ciphertext>>
     </payload>
 
-  </spqr>
+  </x3dhpq>
 </message>
 ```
 
@@ -543,21 +543,21 @@ The `<payload>` element is shared across all recipients; only the `<key>` blocks
 
 ### 11.1. Opacity contract
 
-The XMPP server is a transport layer. It MUST NOT attempt to decrypt, parse, or inspect the content of any `<spqr>` envelope. The server MUST treat the `<spqr>` element and all its children as opaque binary data, routing it based solely on the outer stanza addressing (`to`/`from` attributes).
+The XMPP server is a transport layer. It MUST NOT attempt to decrypt, parse, or inspect the content of any `<x3dhpq>` envelope. The server MUST treat the `<x3dhpq>` element and all its children as opaque binary data, routing it based solely on the outer stanza addressing (`to`/`from` attributes).
 
-This is enforced at the implementation level in `internal/spqr/envelope.go`: `ValidateEnvelope` checks only that the root element is `<spqr>` with the correct namespace and that the payload size is within bounds. No further parsing of envelope contents is performed.
+This is enforced at the implementation level in `internal/x3dhpq/envelope.go`: `ValidateEnvelope` checks only that the root element is `<x3dhpq>` with the correct namespace and that the payload size is within bounds. No further parsing of envelope contents is performed.
 
 ### 11.2. PEP item size limits
 
-The server MUST enforce a maximum byte size for PEP items published to SPQR nodes. The default limit is:
+The server MUST enforce a maximum byte size for PEP items published to X3DHPQ nodes. The default limit is:
 
 ```
 ItemMaxBytes = 262144  // 256 KiB
 ```
 
-This limit is enforced by `internal/spqr/bundle.go:ValidateBundle`, which is called at publish time for items in the `urn:xmppqr:spqr:bundle:0` node. Items exceeding this limit MUST be rejected with an appropriate XMPP error stanza (SHOULD use `<not-acceptable/>` with a descriptive `<text>` element).
+This limit is enforced by `internal/x3dhpq/bundle.go:ValidateBundle`, which is called at publish time for items in the `urn:xmppqr:x3dhpq:bundle:0` node. Items exceeding this limit MUST be rejected with an appropriate XMPP error stanza (SHOULD use `<not-acceptable/>` with a descriptive `<text>` element).
 
-The same limit applies to `<spqr>` envelopes carried in `<message>` stanzas, enforced by `ValidateEnvelope`.
+The same limit applies to `<x3dhpq>` envelopes carried in `<message>` stanzas, enforced by `ValidateEnvelope`.
 
 ### 11.3. Bundle re-publish rate limiting
 
@@ -567,41 +567,41 @@ To prevent denial-of-service via bundle flooding, the server enforces a per-devi
 PublishesPerMinute = 1  // per device ID
 ```
 
-This is implemented by `internal/spqr/bundle.go:RateChecker`. Each device (identified by device ID) is limited to one bundle publish per minute. Attempts to publish more frequently MUST be rejected with `<policy-violation/>`.
+This is implemented by `internal/x3dhpq/bundle.go:RateChecker`. Each device (identified by device ID) is limited to one bundle publish per minute. Attempts to publish more frequently MUST be rejected with `<policy-violation/>`.
 
 The rate limit is applied per device key (device ID string), tracked in memory with a sliding window. The limit resets after 60 seconds have elapsed since the last allowed publish.
 
-### 11.4. Disco feature `urn:xmppqr:spqr:0`
+### 11.4. Disco feature `urn:xmppqr:x3dhpq:0`
 
-A server supporting this specification MUST advertise the feature `urn:xmppqr:spqr:0` in its service discovery (XEP-0030) response.
+A server supporting this specification MUST advertise the feature `urn:xmppqr:x3dhpq:0` in its service discovery (XEP-0030) response.
 
 ```xml
 <!-- Server disco#info response (fragment) -->
-<feature var='urn:xmppqr:spqr:0'/>
+<feature var='urn:xmppqr:x3dhpq:0'/>
 ```
 
-Clients SHOULD check for this feature before publishing SPQR bundles or sending SPQR envelopes. A client connecting to a server that does not advertise this feature MAY fall back to OMEMO (XEP-0384) or MUST inform the user that post-quantum E2EE is unavailable.
+Clients SHOULD check for this feature before publishing X3DHPQ bundles or sending X3DHPQ envelopes. A client connecting to a server that does not advertise this feature MAY fall back to OMEMO (XEP-0384) or MUST inform the user that post-quantum E2EE is unavailable.
 
-### 11.5. SPQR-only mode (per-domain policy)
+### 11.5. X3DHPQ-only mode (per-domain policy)
 
-A server MAY be configured to operate in SPQR-only mode, rejecting `<message>` stanzas that do not contain a `<spqr>` envelope.
+A server MAY be configured to operate in X3DHPQ-only mode, rejecting `<message>` stanzas that do not contain a `<x3dhpq>` envelope.
 
-This is implemented by `internal/spqr/policy.go:EnforceMessagePolicy`. When `DomainPolicy.SPQROnlyMode` is `true`, any `<message>` stanza that does not contain a `<spqr xmlns='urn:xmppqr:spqr:envelope:0'>` child element at depth 2 is rejected. The server returns a `<policy-violation/>` error:
+This is implemented by `internal/x3dhpq/policy.go:EnforceMessagePolicy`. When `DomainPolicy.X3DHPQOnlyMode` is `true`, any `<message>` stanza that does not contain a `<x3dhpq xmlns='urn:xmppqr:x3dhpq:envelope:0'>` child element at depth 2 is rejected. The server returns a `<policy-violation/>` error:
 
 ```xml
 <message type='error' from='example.org' to='alice@example.org/phone'>
   <error type='modify'>
     <policy-violation xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/>
     <text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>
-      SPQR-only mode requires a SPQR envelope
+      X3DHPQ-only mode requires a X3DHPQ envelope
     </text>
   </error>
 </message>
 ```
 
-SPQR-only mode is a domain-wide policy and is NOT negotiated per-session. Clients connecting to a server with SPQR-only mode MUST support this specification; legacy OMEMO-only clients will not be able to send messages on such a domain.
+X3DHPQ-only mode is a domain-wide policy and is NOT negotiated per-session. Clients connecting to a server with X3DHPQ-only mode MUST support this specification; legacy OMEMO-only clients will not be able to send messages on such a domain.
 
-Federation implications of SPQR-only mode are discussed in Section 16.
+Federation implications of X3DHPQ-only mode are discussed in Section 16.
 
 ---
 
@@ -609,12 +609,12 @@ Federation implications of SPQR-only mode are discussed in Section 16.
 
 ### 12.1. Capability advertisement
 
-A client supporting SPQR-over-XMPP MUST advertise the feature `urn:xmppqr:spqr:0` in its entity capabilities (XEP-0115) and in its disco#info response.
+A client supporting X3DHPQ-over-XMPP MUST advertise the feature `urn:xmppqr:x3dhpq:0` in its entity capabilities (XEP-0115) and in its disco#info response.
 
 ```xml
 <iq type='result' from='alice@example.org/phone' id='caps-1'>
   <query xmlns='http://jabber.org/protocol/disco#info'>
-    <feature var='urn:xmppqr:spqr:0'/>
+    <feature var='urn:xmppqr:x3dhpq:0'/>
     <!-- Other features... -->
   </query>
 </iq>
@@ -622,11 +622,11 @@ A client supporting SPQR-over-XMPP MUST advertise the feature `urn:xmppqr:spqr:0
 
 ### 12.2. Bundle availability check
 
-Before initiating a SPQR session with a contact, a client MUST:
+Before initiating a X3DHPQ session with a contact, a client MUST:
 
-1. Verify the server advertises `urn:xmppqr:spqr:0` (Section 11.4).
-2. Fetch the contact's device list from `urn:xmppqr:spqr:devicelist:0`.
-3. For each device, fetch the bundle from `urn:xmppqr:spqr:bundle:0`.
+1. Verify the server advertises `urn:xmppqr:x3dhpq:0` (Section 11.4).
+2. Fetch the contact's device list from `urn:xmppqr:x3dhpq:devicelist:0`.
+3. For each device, fetch the bundle from `urn:xmppqr:x3dhpq:bundle:0`.
 4. Verify the bundle signature (Section 7.2).
 
 A session MUST NOT be established to a device whose bundle is absent or whose bundle signature fails verification.
@@ -637,27 +637,27 @@ When Alice sends a message to Bob, who has N devices, Alice MUST encrypt the mes
 
 ### 12.4. Unknown devices
 
-If Alice discovers a new device in Bob's device list after a session has already been established, Alice MUST initiate a new SPQR session with that device before sending it messages. Alice MAY send a device-addressed probe message (carrying no user-visible content) to establish the session.
+If Alice discovers a new device in Bob's device list after a session has already been established, Alice MUST initiate a new X3DHPQ session with that device before sending it messages. Alice MAY send a device-addressed probe message (carrying no user-visible content) to establish the session.
 
 ---
 
 ## 13. Coexistence with XEP-0384 OMEMO
 
-SPQR-over-XMPP and OMEMO MAY coexist on the same server, unless the server operates in SPQR-only mode (Section 11.5).
+X3DHPQ-over-XMPP and OMEMO MAY coexist on the same server, unless the server operates in X3DHPQ-only mode (Section 11.5).
 
 ### 13.1. Feature negotiation
 
-A client that supports both SPQR-over-XMPP and OMEMO SHOULD prefer SPQR-over-XMPP when both the sender and all recipient devices advertise `urn:xmppqr:spqr:0`. Fallback to OMEMO is permissible when a recipient device does not support SPQR-over-XMPP.
+A client that supports both X3DHPQ-over-XMPP and OMEMO SHOULD prefer X3DHPQ-over-XMPP when both the sender and all recipient devices advertise `urn:xmppqr:x3dhpq:0`. Fallback to OMEMO is permissible when a recipient device does not support X3DHPQ-over-XMPP.
 
 When falling back to OMEMO, the client MUST clearly indicate to the user that the message is NOT protected against quantum adversaries.
 
 ### 13.2. Mixed sessions
 
-A single `<message>` stanza MUST NOT carry both a `<spqr>` envelope (this spec) and an OMEMO `<encrypted>` element (XEP-0384). Senders MUST choose one protocol per message.
+A single `<message>` stanza MUST NOT carry both a `<x3dhpq>` envelope (this spec) and an OMEMO `<encrypted>` element (XEP-0384). Senders MUST choose one protocol per message.
 
 ### 13.3. Session isolation
 
-SPQR session state and OMEMO session state are completely independent. They share no keying material, no ratchet state, and no pre-keys. A device that supports both protocols MUST maintain separate key stores for each.
+X3DHPQ session state and OMEMO session state are completely independent. They share no keying material, no ratchet state, and no pre-keys. A device that supports both protocols MUST maintain separate key stores for each.
 
 ---
 
@@ -685,9 +685,9 @@ This mitigates the HNDL threat: a quantum adversary who can break X25519 but can
 
 **Post-compromise security (PCS)** against a classical adversary is provided by the DH ratchet: after a compromise, the first DH ratchet step (triggered by the next reply from the non-compromised party) restores security, because the attacker does not know the new ephemeral X25519 private key.
 
-**Post-compromise security against a quantum adversary** is provided by the SPQR KEM checkpoints. Every K messages or T seconds, a fresh ML-KEM-768 encapsulation injects fresh entropy from the non-compromised party's KEM key pair. After the checkpoint, the session key is derived from `kem_ss`, which the attacker cannot derive without the decapsulation key. Thus, even if a quantum adversary had full session state at time t, security is restored within K messages or T seconds.
+**Post-compromise security against a quantum adversary** is provided by the X3DHPQ KEM checkpoints. Every K messages or T seconds, a fresh ML-KEM-768 encapsulation injects fresh entropy from the non-compromised party's KEM key pair. After the checkpoint, the session key is derived from `kem_ss`, which the attacker cannot derive without the decapsulation key. Thus, even if a quantum adversary had full session state at time t, security is restored within K messages or T seconds.
 
-The formal security analysis of the SPQR construction is provided by Signal in the SparsePostQuantumRatchet repository and associated documentation. This document relies on that analysis; implementers SHOULD review it.
+The formal security analysis of the X3DHPQ construction is provided by Signal in the SparsePostQuantumRatchet repository in the SparsePostQuantumRatchet repository and associated documentation. This document relies on that analysis; implementers SHOULD review it.
 
 ### 14.3. Out-of-order delivery and replay
 
@@ -704,7 +704,7 @@ The XMPP server is assumed to be **honest-but-curious**: it correctly routes mes
 The server observes:
 - Sender and recipient JIDs (traffic metadata)
 - Message timestamps and sizes
-- Whether messages carry `<spqr>` envelopes (yes/no)
+- Whether messages carry `<x3dhpq>` envelopes (yes/no)
 - PEP bundle publications (public keys, but not private keys)
 
 The server does NOT observe:
@@ -740,12 +740,12 @@ The xmppqr project uses wolfSSL/wolfCrypt for all cryptographic primitives. wolf
 
 ### 15.1. Server-side reference implementation
 
-The xmppqr server provides the reference implementation of the server-side components of this specification. The relevant package is `internal/spqr/`:
+The xmppqr server provides the reference implementation of the server-side components of this specification. The relevant package is `internal/x3dhpq/`:
 
 - `ns.go`: namespace constants (`NSRoot`, `NSBundle`, `NSDeviceList`, `NSEnvelope`).
 - `bundle.go`: `ValidateBundle` (size and structure checking), `RateChecker` (rate limiting), `DefaultLimits`.
 - `envelope.go`: `ValidateEnvelope` (size and namespace checking).
-- `policy.go`: `EnforceMessagePolicy` (SPQR-only mode enforcement).
+- `policy.go`: `EnforceMessagePolicy` (X3DHPQ-only mode enforcement).
 
 The server does not implement ratchet state or cryptographic operations; these are entirely client-side.
 
@@ -794,11 +794,11 @@ Clients SHOULD monitor their published bundle and replenish one-time pre-keys wh
 
 The following questions are deferred and require resolution before this document can be advanced beyond Experimental status:
 
-**OQ-1: SPQR-only mode and federation**
-When a domain operates in SPQR-only mode, messages arriving from federated domains that do not support SPQR-over-XMPP will be rejected by `EnforceMessagePolicy`. The correct behavior is unclear: should the server silently drop these messages, return an error to the sending server, or maintain a per-domain exception list? A hard reject may break federation with the majority of existing XMPP servers. Options include: (a) SPQR-only mode applies only to intra-domain messages; (b) federated servers are required to negotiate SPQR capability before message delivery is accepted; (c) a per-remote-domain exception list is maintained by the server operator. No recommendation is made at this time.
+**OQ-1: X3DHPQ-only mode and federation**
+When a domain operates in X3DHPQ-only mode, messages arriving from federated domains that do not support X3DHPQ-over-XMPP will be rejected by `EnforceMessagePolicy`. The correct behavior is unclear: should the server silently drop these messages, return an error to the sending server, or maintain a per-domain exception list? A hard reject may break federation with the majority of existing XMPP servers. Options include: (a) X3DHPQ-only mode applies only to intra-domain messages; (b) federated servers are required to negotiate X3DHPQ capability before message delivery is accepted; (c) a per-remote-domain exception list is maintained by the server operator. No recommendation is made at this time.
 
 **OQ-2: Group messaging (MUC)**
-Multi-User Chat (MUC, XEP-0045) and MUC Lite scenarios require key distribution to a dynamically changing set of participants. The pairwise session model of the Triple Ratchet does not directly extend to groups. Signal's approach (Sender Keys) is one option; the MLS protocol (RFC 9420) is another. Group SPQR is out of scope for this version. A future XEP-XQR-MUC document will address this.
+Multi-User Chat (MUC, XEP-0045) and MUC Lite scenarios require key distribution to a dynamically changing set of participants. The pairwise session model of the Triple Ratchet does not directly extend to groups. Signal's approach (Sender Keys) is one option; the MLS protocol (RFC 9420) is another. Group X3DHPQ is out of scope for this version. A future XEP-XQR-MUC document will address this.
 
 **OQ-3: Key transparency and verifiable bundles**
 The current model trusts the server to deliver authentic bundles. A malicious server can substitute bundles to perform MITM attacks against sessions being established for the first time. Key transparency (e.g., a Merkle-tree audit log of bundle publications, similar to Key Transparency as used in WhatsApp or Google's KT) would mitigate this threat but adds significant protocol and infrastructure complexity. This is out of scope for version 0.1.

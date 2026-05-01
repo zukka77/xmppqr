@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-package spqrcrypto
+package x3dhpqcrypto
 
 import (
 	"errors"
@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	infoX3DH           = "SPQR-X3DH-PQ-v0"
-	infoRootKey        = "SPQR-RootKey-v0"
-	infoHybridRoot     = "SPQR-HybridRoot-v0"
-	infoTripleRatchet  = "SPQR-TripleRatchet-v0"
-	infoMessageKey     = "SPQR-MessageKey-v0"
+	infoX3DH           = "X3DHPQ-X3DH-PQ-v0"
+	infoRootKey        = "X3DHPQ-RootKey-v0"
+	infoHybridRoot     = "X3DHPQ-HybridRoot-v0"
+	infoTripleRatchet  = "X3DHPQ-TripleRatchet-v0"
+	infoMessageKey     = "X3DHPQ-MessageKey-v0"
 )
 
 // hkdf64 derives 64 bytes using HKDF-SHA512 with a zero salt.
@@ -61,7 +61,7 @@ func InitiateSession(
 	kemPreKeyID uint32,
 ) (rootKey []byte, ad []byte, kemCiphertext []byte, opkUsed bool, err error) {
 	if myIdentity == nil || peer == nil {
-		return nil, nil, nil, false, errors.New("spqrcrypto: nil argument")
+		return nil, nil, nil, false, errors.New("x3dhpqcrypto: nil argument")
 	}
 
 	dh1, err := wolfcrypt.X25519SharedSecret(myIdentity.PrivX25519, peer.SPKPub)
@@ -110,7 +110,7 @@ func InitiateSession(
 		}
 	}
 	if kemPub == nil {
-		return nil, nil, nil, false, errors.New("spqrcrypto: KEM prekey not found")
+		return nil, nil, nil, false, errors.New("x3dhpqcrypto: KEM prekey not found")
 	}
 	ct, kemSS, err := wolfcrypt.MLKEM768Encapsulate(kemPub)
 	if err != nil {

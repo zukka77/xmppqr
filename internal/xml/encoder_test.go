@@ -24,7 +24,7 @@ func TestEncoderOpenStream(t *testing.T) {
 }
 
 func TestWriteElementRoundTrip(t *testing.T) {
-	// SPQR opacity contract: unknown child bytes must survive the round-trip.
+	// X3DHPQ opacity contract: unknown child bytes must survive the round-trip.
 	opaqueChild := []byte(`<x xmlns='urn:custom'>opaque-data</x>`)
 
 	start := xml.StartElement{

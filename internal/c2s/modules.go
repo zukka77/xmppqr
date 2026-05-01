@@ -16,7 +16,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/pubsub"
 	"github.com/danielinux/xmppqr/internal/push"
 	"github.com/danielinux/xmppqr/internal/roster"
-	"github.com/danielinux/xmppqr/internal/spqr"
+	"github.com/danielinux/xmppqr/internal/x3dhpq"
 	"github.com/danielinux/xmppqr/internal/vcard"
 )
 
@@ -35,7 +35,7 @@ type Modules struct {
 	PEP        *pep.Service
 	MUC        *muc.Service
 	Metrics    *metrics.Metrics
-	SPQRPolicy spqr.DomainPolicy
+	X3DHPQPolicy x3dhpq.DomainPolicy
 	Caps       *caps.Cache
 	IBR        *ibr.Service
 }

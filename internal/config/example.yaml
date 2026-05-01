@@ -37,4 +37,4 @@ modules:
   pep: true
   sm: true
   csi: true
-  spqr_item_max_bytes: 262144
+  x3dhpq_item_max_bytes: 262144

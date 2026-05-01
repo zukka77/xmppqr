@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-package spqrcrypto
+package x3dhpqcrypto
 
 import (
 	"encoding/binary"
@@ -62,7 +62,7 @@ func spkSignInput(pub []byte, id uint32) []byte {
 
 func NewBundle(identity *IdentityKey, kemPreKeys, otpks int) (*Bundle, error) {
 	if identity == nil {
-		return nil, errors.New("spqrcrypto: nil identity")
+		return nil, errors.New("x3dhpqcrypto: nil identity")
 	}
 
 	xPub, xPriv, err := wolfcrypt.GenerateX25519()

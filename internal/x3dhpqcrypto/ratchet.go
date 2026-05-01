@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-package spqrcrypto
+package x3dhpqcrypto
 
 import (
 	"bytes"
@@ -215,7 +215,7 @@ func (s *State) EncryptMessage(plaintext []byte, now time.Time) (*MessageHeader,
 
 func (s *State) skipMessageKeys(dhPub string, until uint32) error {
 	if until-s.RecvCount > maxSkipKeys {
-		return errors.New("spqrcrypto: too many skipped messages")
+		return errors.New("x3dhpqcrypto: too many skipped messages")
 	}
 	for s.RecvCount < until {
 		mk, nextCK, err := chainStep(s.ChainRecvKey)

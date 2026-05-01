@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-package spqrcrypto
+package x3dhpqcrypto
 
 import (
 	"encoding/binary"
@@ -43,12 +43,12 @@ func (h *MessageHeader) Marshal() []byte {
 
 func unmarshalField(data []byte, off int) ([]byte, int, error) {
 	if off+4 > len(data) {
-		return nil, off, errors.New("spqrcrypto: header truncated reading length")
+		return nil, off, errors.New("x3dhpqcrypto: header truncated reading length")
 	}
 	l := int(binary.BigEndian.Uint32(data[off : off+4]))
 	off += 4
 	if off+l > len(data) {
-		return nil, off, errors.New("spqrcrypto: header truncated reading field")
+		return nil, off, errors.New("x3dhpqcrypto: header truncated reading field")
 	}
 	if l == 0 {
 		return nil, off, nil
@@ -62,7 +62,7 @@ func unmarshalU32(data []byte, off int) (uint32, int, error) {
 		return 0, off, err
 	}
 	if len(f) != 4 {
-		return 0, noff, errors.New("spqrcrypto: expected 4-byte uint32 field")
+		return 0, noff, errors.New("x3dhpqcrypto: expected 4-byte uint32 field")
 	}
 	return binary.BigEndian.Uint32(f), noff, nil
 }

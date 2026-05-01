@@ -10,5 +10,5 @@ type ModulesConfig struct {
 	SM               bool `yaml:"sm"`
 	CSI              bool `yaml:"csi"`
 	IBR              bool `yaml:"ibr"`
-	SPQRItemMaxBytes int  `yaml:"spqr_item_max_bytes"`
+	X3DHPQItemMaxBytes int  `yaml:"x3dhpq_item_max_bytes"`
 }

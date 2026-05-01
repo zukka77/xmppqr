@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Package spqrcrypto implements the SPQR Triple Ratchet cryptography layer.
-package spqrcrypto
+// Package x3dhpqcrypto implements the X3DHPQ Triple Ratchet cryptography layer.
+package x3dhpqcrypto
 
 import "github.com/danielinux/xmppqr/internal/wolfcrypt"
 

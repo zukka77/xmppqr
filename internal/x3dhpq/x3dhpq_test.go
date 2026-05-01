@@ -1,4 +1,4 @@
-package spqr
+package x3dhpq
 
 import (
 	"fmt"
@@ -52,18 +52,18 @@ func TestRateCheckerRejectsThenAllows(t *testing.T) {
 	}
 }
 
-func TestSPQROnlyModeRejectsPlain(t *testing.T) {
-	policy := DomainPolicy{SPQROnlyMode: true}
+func TestX3DHPQOnlyModeRejectsPlain(t *testing.T) {
+	policy := DomainPolicy{X3DHPQOnlyMode: true}
 	msg := []byte(`<message to="bob@example.com"><body>hi</body></message>`)
 	if err := EnforceMessagePolicy(msg, policy); err == nil {
 		t.Error("expected policy-violation for plain message")
 	}
 }
 
-func TestSPQROnlyModeAcceptsEnvelope(t *testing.T) {
-	policy := DomainPolicy{SPQROnlyMode: true}
-	msg := []byte(fmt.Sprintf(`<message to="bob@example.com"><spqr xmlns="%s"/></message>`, NSEnvelope))
+func TestX3DHPQOnlyModeAcceptsEnvelope(t *testing.T) {
+	policy := DomainPolicy{X3DHPQOnlyMode: true}
+	msg := []byte(fmt.Sprintf(`<message to="bob@example.com"><x3dhpq xmlns="%s"/></message>`, NSEnvelope))
 	if err := EnforceMessagePolicy(msg, policy); err != nil {
-		t.Errorf("expected ok for message with spqr envelope, got: %v", err)
+		t.Errorf("expected ok for message with x3dhpq envelope, got: %v", err)
 	}
 }

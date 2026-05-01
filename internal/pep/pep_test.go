@@ -94,7 +94,7 @@ func TestPEPAutoCreateAndNotify(t *testing.T) {
 	svc, sess := newTestPEP(t)
 	ctx := context.Background()
 	from, _ := stanza.Parse("alice@example.com/work")
-	node := "urn:xmppqr:spqr:bundle:0"
+	node := "urn:xmppqr:x3dhpq:bundle:0"
 
 	iq := buildPEPPublishIQ(node, "bundle1", []byte("<bundle/>"))
 	raw, err := svc.HandleIQ(ctx, from, iq)

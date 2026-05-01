@@ -41,7 +41,7 @@ func DefaultServer() *Features {
 			"http://jabber.org/protocol/pubsub",
 			"urn:xmpp:blocking",
 			"vcard-temp",
-			"urn:xmppqr:spqr:0",
+			"urn:xmppqr:x3dhpq:0",
 			"urn:ietf:params:xml:ns:xmpp-session",
 			"jabber:iq:version",
 			"jabber:iq:last",

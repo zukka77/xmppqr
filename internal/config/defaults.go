@@ -30,7 +30,7 @@ func Defaults() *Config {
 			PEP:              true,
 			SM:               true,
 			CSI:              true,
-			SPQRItemMaxBytes: 256 * 1024,
+			X3DHPQItemMaxBytes: 256 * 1024,
 		},
 		S2S: S2SConfig{
 			Enabled:         false,

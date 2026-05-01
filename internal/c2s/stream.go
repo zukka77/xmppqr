@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/danielinux/xmppqr/internal/disco"
-	"github.com/danielinux/xmppqr/internal/spqr"
+	"github.com/danielinux/xmppqr/internal/x3dhpq"
 	"github.com/danielinux/xmppqr/internal/stanza"
 	"github.com/danielinux/xmppqr/internal/version"
 	xmlpkg "github.com/danielinux/xmppqr/internal/xml"
@@ -331,8 +331,8 @@ func handleOutboundMessage(ctx context.Context, s *Session, start xml.StartEleme
 		}
 	}
 
-	if mods != nil && mods.SPQRPolicy.SPQROnlyMode {
-		if err := spqr.EnforceMessagePolicy(raw, mods.SPQRPolicy); err != nil {
+	if mods != nil && mods.X3DHPQPolicy.X3DHPQOnlyMode {
+		if err := x3dhpq.EnforceMessagePolicy(raw, mods.X3DHPQPolicy); err != nil {
 			errMsg := fmt.Sprintf(
 				`<message to='%s'><error type='cancel'><policy-violation xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></message>`,
 				xmlEscape(s.jid.String()),

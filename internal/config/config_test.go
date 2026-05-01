@@ -30,8 +30,8 @@ func TestRoundTrip(t *testing.T) {
 	if got.TLS.MinVersion != orig.TLS.MinVersion {
 		t.Errorf("tls.min_version: got %q want %q", got.TLS.MinVersion, orig.TLS.MinVersion)
 	}
-	if got.Modules.SPQRItemMaxBytes != orig.Modules.SPQRItemMaxBytes {
-		t.Errorf("spqr_item_max_bytes: got %d want %d", got.Modules.SPQRItemMaxBytes, orig.Modules.SPQRItemMaxBytes)
+	if got.Modules.X3DHPQItemMaxBytes != orig.Modules.X3DHPQItemMaxBytes {
+		t.Errorf("x3dhpq_item_max_bytes: got %d want %d", got.Modules.X3DHPQItemMaxBytes, orig.Modules.X3DHPQItemMaxBytes)
 	}
 }
 
@@ -58,8 +58,8 @@ func TestDefaultsApplied(t *testing.T) {
 	if !cfg.TLS.PreferPQHybrid {
 		t.Error("default PreferPQHybrid should be true")
 	}
-	if cfg.Modules.SPQRItemMaxBytes != 256*1024 {
-		t.Errorf("default SPQRItemMaxBytes: got %d", cfg.Modules.SPQRItemMaxBytes)
+	if cfg.Modules.X3DHPQItemMaxBytes != 256*1024 {
+		t.Errorf("default X3DHPQItemMaxBytes: got %d", cfg.Modules.X3DHPQItemMaxBytes)
 	}
 }
 

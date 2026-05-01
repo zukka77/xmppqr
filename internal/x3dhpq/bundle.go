@@ -1,4 +1,4 @@
-package spqr
+package x3dhpq
 
 import (
 	"bytes"
@@ -49,23 +49,23 @@ func (rc *RateChecker) Allow(deviceKey string) bool {
 
 func ValidateBundle(payload []byte, limits Limits) error {
 	if len(payload) == 0 {
-		return errors.New("spqr: bundle payload is empty")
+		return errors.New("x3dhpq: bundle payload is empty")
 	}
 	if int64(len(payload)) > limits.ItemMaxBytes {
-		return errors.New("spqr: bundle exceeds size limit")
+		return errors.New("x3dhpq: bundle exceeds size limit")
 	}
 
 	dec := xml.NewDecoder(bytes.NewReader(payload))
 	tok, err := dec.Token()
 	if err != nil {
-		return errors.New("spqr: bundle is not valid XML")
+		return errors.New("x3dhpq: bundle is not valid XML")
 	}
 	start, ok := tok.(xml.StartElement)
 	if !ok {
-		return errors.New("spqr: bundle: expected start element")
+		return errors.New("x3dhpq: bundle: expected start element")
 	}
 	if start.Name.Local != "bundle" {
-		return errors.New("spqr: bundle: root element must be <bundle>")
+		return errors.New("x3dhpq: bundle: root element must be <bundle>")
 	}
 	ns := start.Name.Space
 	if ns == "" {
@@ -76,7 +76,7 @@ func ValidateBundle(payload []byte, limits Limits) error {
 		}
 	}
 	if ns != NSBundle {
-		return errors.New("spqr: bundle: wrong namespace")
+		return errors.New("x3dhpq: bundle: wrong namespace")
 	}
 
 	hasIdentity := false
@@ -93,7 +93,7 @@ func ValidateBundle(payload []byte, limits Limits) error {
 		}
 	}
 	if !hasIdentity {
-		return errors.New("spqr: bundle: missing <identity> child")
+		return errors.New("x3dhpq: bundle: missing <identity> child")
 	}
 	return nil
 }

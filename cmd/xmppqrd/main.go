@@ -40,7 +40,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/router"
 	"github.com/danielinux/xmppqr/internal/s2s"
 	"github.com/danielinux/xmppqr/internal/sm"
-	"github.com/danielinux/xmppqr/internal/spqr"
+	"github.com/danielinux/xmppqr/internal/x3dhpq"
 	"github.com/danielinux/xmppqr/internal/storage"
 	"github.com/danielinux/xmppqr/internal/storage/memstore"
 	"github.com/danielinux/xmppqr/internal/storage/pg"
@@ -282,7 +282,7 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 
 	rosterMgr := roster.New(stores.Roster, logger)
 	capsCache := caps.New()
-	ps := pubsub.New(stores.PEP, rt, logger, int64(cfg.Modules.SPQRItemMaxBytes))
+	ps := pubsub.New(stores.PEP, rt, logger, int64(cfg.Modules.X3DHPQItemMaxBytes))
 	ps.WithContactNotify(rosterMgr, capsCache)
 
 	uploadSvc := httpupload.New(
@@ -321,7 +321,7 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 		PEP:        pep.New(ps, logger),
 		MUC:        muc.New(cfg.Server.Domain, "conference", stores.MUC, rt, logger),
 		Metrics:    metrics.New(nil),
-		SPQRPolicy: spqr.DomainPolicy{SPQROnlyMode: false},
+		X3DHPQPolicy: x3dhpq.DomainPolicy{X3DHPQOnlyMode: false},
 		Caps:       capsCache,
 		IBR:        ibr.New(stores, cfg.Server.Domain, cfg.Modules.IBR),
 	}

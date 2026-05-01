@@ -1,4 +1,4 @@
-package spqr
+package x3dhpq
 
 import (
 	"bytes"
@@ -7,11 +7,11 @@ import (
 )
 
 type DomainPolicy struct {
-	SPQROnlyMode bool
+	X3DHPQOnlyMode bool
 }
 
 func EnforceMessagePolicy(messageXML []byte, policy DomainPolicy) error {
-	if !policy.SPQROnlyMode {
+	if !policy.X3DHPQOnlyMode {
 		return nil
 	}
 
@@ -34,7 +34,7 @@ func EnforceMessagePolicy(messageXML []byte, policy DomainPolicy) error {
 						}
 					}
 				}
-				if t.Name.Local == "spqr" && ns == NSEnvelope {
+				if t.Name.Local == "x3dhpq" && ns == NSEnvelope {
 					return nil
 				}
 			}
@@ -42,5 +42,5 @@ func EnforceMessagePolicy(messageXML []byte, policy DomainPolicy) error {
 			depth--
 		}
 	}
-	return errors.New("<policy-violation>: SPQR-only mode requires <spqr> envelope")
+	return errors.New("<policy-violation>: X3DHPQ-only mode requires <x3dhpq> envelope")
 }

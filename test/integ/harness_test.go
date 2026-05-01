@@ -37,7 +37,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/router"
 	"github.com/danielinux/xmppqr/internal/s2s"
 	"github.com/danielinux/xmppqr/internal/sm"
-	"github.com/danielinux/xmppqr/internal/spqr"
+	"github.com/danielinux/xmppqr/internal/x3dhpq"
 	"github.com/danielinux/xmppqr/internal/stanza"
 	"github.com/danielinux/xmppqr/internal/storage"
 	"github.com/danielinux/xmppqr/internal/storage/memstore"
@@ -325,7 +325,7 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 		PEP:        pep.New(ps, slog.Default()),
 		MUC:        muc.New(domain, "conference", stores.MUC, rt, slog.Default()),
 		Metrics:    metrics.New(prometheus.NewRegistry()),
-		SPQRPolicy: spqr.DomainPolicy{SPQROnlyMode: false},
+		X3DHPQPolicy: x3dhpq.DomainPolicy{X3DHPQOnlyMode: false},
 		Caps:       capsCache,
 		IBR:        ibr.New(stores, domain, allowIBR),
 	}
