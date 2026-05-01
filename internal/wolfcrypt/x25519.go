@@ -12,6 +12,17 @@ package wolfcrypt
 // but not exposed in dev headers; declare it manually.
 int wc_curve25519_set_rng(curve25519_key* key, WC_RNG* rng);
 
+// Computes pub = priv * basepoint for a clamped 32-byte private scalar.
+static int x25519_derive_public(const unsigned char* priv, unsigned char* pub) {
+    return wc_curve25519_make_pub(32, pub, 32, (unsigned char*)priv);
+}
+
+// Computes result = scalar * point using wc_curve25519_generic (no high-order checks).
+// Used for CPace where the base point is password-derived, not the standard basepoint.
+static int x25519_scalar_mult(const unsigned char* scalar, const unsigned char* point, unsigned char* result) {
+    return wc_curve25519_generic(32, result, 32, scalar, 32, point);
+}
+
 static int x25519_generate(WC_RNG* rng, unsigned char* pub, unsigned char* priv) {
     curve25519_key* key = (curve25519_key*)calloc(1, sizeof(curve25519_key));
     if (!key) return -1;
@@ -67,6 +78,30 @@ func GenerateX25519() (pub, priv []byte, err error) {
 		return nil, nil, wolfErr(rc)
 	}
 	return pub, priv, nil
+}
+
+func X25519DerivePublic(priv []byte) ([]byte, error) {
+	pub := make([]byte, 32)
+	rc := C.x25519_derive_public((*C.uchar)(unsafe.Pointer(&priv[0])), (*C.uchar)(unsafe.Pointer(&pub[0])))
+	if rc != 0 {
+		return nil, wolfErr(rc)
+	}
+	return pub, nil
+}
+
+// X25519ScalarMult computes scalar * point using wc_curve25519_generic. Unlike
+// X25519SharedSecret it does NOT apply wolfcrypt's high-order-point safety checks,
+// which is correct for CPace where the base point is password-derived.
+func X25519ScalarMult(scalar, point []byte) ([]byte, error) {
+	result := make([]byte, 32)
+	rc := C.x25519_scalar_mult(
+		(*C.uchar)(unsafe.Pointer(&scalar[0])),
+		(*C.uchar)(unsafe.Pointer(&point[0])),
+		(*C.uchar)(unsafe.Pointer(&result[0])))
+	if rc != 0 {
+		return nil, wolfErr(rc)
+	}
+	return result, nil
 }
 
 func X25519SharedSecret(priv, peerPub []byte) ([]byte, error) {
