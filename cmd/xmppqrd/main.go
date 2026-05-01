@@ -49,7 +49,7 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "", "path to YAML config (optional; uses defaults if absent)")
-	devUser := flag.String("dev-user", "test", "dev: pre-create this user with the given password")
+	devUser := flag.String("dev-user", "", "dev: pre-create this user with the given password")
 	devPass := flag.String("dev-pass", "test", "dev: password for the pre-created user")
 	flag.Parse()
 
@@ -93,10 +93,12 @@ func main() {
 		defer pgDB.Close()
 	}
 
-	if err := seedDevUser(context.Background(), stores, *devUser, cfg.Server.Domain, *devPass); err != nil {
-		fatal("seed user: %v", err)
+	if *devUser != "" {
+		if err := seedDevUser(context.Background(), stores, *devUser, cfg.Server.Domain, *devPass); err != nil {
+			fatal("seed user: %v", err)
+		}
+		logger.Info("seeded dev user", "jid", *devUser+"@"+cfg.Server.Domain)
 	}
-	logger.Info("seeded dev user", "jid", *devUser+"@"+cfg.Server.Domain)
 
 	rt := router.New()
 	rt.SetLocalDomain(cfg.Server.Domain)

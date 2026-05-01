@@ -10,6 +10,8 @@ func Defaults() *Config {
 			AdminPProf:   "127.0.0.1:6060",
 		},
 		TLS: TLSConfig{
+			CertFile:       "/etc/xmppqr/tls/cert.pem",
+			KeyFile:        "/etc/xmppqr/tls/key.pem",
 			MinVersion:     "TLS1.2",
 			PreferPQHybrid: true,
 		},

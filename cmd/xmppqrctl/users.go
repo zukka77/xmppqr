@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/term"
@@ -16,6 +17,7 @@ import (
 )
 
 func cmdUseradd(args []string) int {
+	args = normalizeSinglePositionalArgs(args)
 	fs := flag.NewFlagSet("useradd", flag.ContinueOnError)
 	domain := fs.String("domain", "", "XMPP domain")
 	cfgPath := fs.String("config", "", "config file path")
@@ -142,6 +144,7 @@ func cmdUserlist(args []string) int {
 }
 
 func cmdUserdel(args []string) int {
+	args = normalizeSinglePositionalArgs(args)
 	fs := flag.NewFlagSet("userdel", flag.ContinueOnError)
 	cfgPath := fs.String("config", "", "config file path")
 	if err := fs.Parse(args); err != nil {
@@ -198,8 +201,32 @@ func readPassword(prompt string) ([]byte, error) {
 }
 
 func loadConfig(path string) (*config.Config, error) {
-	if path == "" {
-		return config.Defaults(), nil
+	if path != "" {
+		return config.Load(path)
 	}
-	return config.Load(path)
+
+	if envPath := os.Getenv("XMPPQR_CONFIG"); envPath != "" {
+		return config.Load(envPath)
+	}
+
+	for _, candidate := range []string{
+		"./xmppqrd.yaml",
+		"/etc/xmppqr/xmppqrd.yaml",
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return config.Load(candidate)
+		}
+	}
+
+	return config.Defaults(), nil
+}
+
+func normalizeSinglePositionalArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return args
+	}
+	return append(args[1:], args[0])
 }

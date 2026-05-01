@@ -46,13 +46,42 @@ func TestNoArgs(t *testing.T) {
 }
 
 func TestUseraddRequiresPostgres(t *testing.T) {
-	cmd := exec.Command(binPath, "useradd", "testuser", "-password", "pw123")
+	cfgFile := writeTempMemoryConfig(t)
+	cmd := exec.Command(binPath, "useradd", "testuser", "-config", cfgFile, "-password", "pw123")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatal("expected non-zero exit for memory driver")
 	}
 	if !strings.Contains(strings.ToLower(string(out)), "postgres") {
 		t.Fatalf("expected mention of postgres in stderr, got: %q", string(out))
+	}
+}
+
+func TestLoadConfigAutodetectsLocalFile(t *testing.T) {
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldwd) })
+
+	content := "server:\n  domain: autodetect.local\nlisteners:\n  c2s_starttls: \":5222\"\ndb:\n  driver: postgres\n  dsn: \"host=127.0.0.1 dbname=xmppqr\"\n"
+	if err := os.WriteFile(filepath.Join(tmp, "xmppqrd.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig("")
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.DB.Driver != "postgres" {
+		t.Fatalf("expected postgres driver, got %q", cfg.DB.Driver)
+	}
+	if cfg.Server.Domain != "autodetect.local" {
+		t.Fatalf("expected autodetected domain, got %q", cfg.Server.Domain)
 	}
 }
 
@@ -101,6 +130,21 @@ func writeTempConfig(t *testing.T, dsn string) string {
 	}
 	t.Cleanup(func() { os.Remove(f.Name()) })
 	content := "server:\n  domain: test.local\nlisteners:\n  c2s_starttls: \":5222\"\ndb:\n  driver: postgres\n  dsn: \"" + dsn + "\"\n  migrate_on_start: true\n"
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return f.Name()
+}
+
+func writeTempMemoryConfig(t *testing.T) string {
+	t.Helper()
+	f, err := os.CreateTemp("", "xmppqr-cfg-memory-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(f.Name()) })
+	content := "server:\n  domain: test.local\nlisteners:\n  c2s_starttls: \":5222\"\ndb:\n  driver: memory\n"
 	if _, err := f.WriteString(content); err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -19,6 +20,15 @@ const (
 	scryptSaltLen = 16
 )
 
+type storedPasswordJSON struct {
+	KDF  string `json:"kdf"`
+	N    int    `json:"n"`
+	R    int    `json:"r"`
+	P    int    `json:"p"`
+	Salt string `json:"salt"`
+	Hash string `json:"hash"`
+}
+
 func HashPasswordForStorage(password []byte) (string, error) {
 	salt := make([]byte, scryptSaltLen)
 	if _, err := wolfcrypt.Read(salt); err != nil {
@@ -30,7 +40,18 @@ func HashPasswordForStorage(password []byte) (string, error) {
 	}
 	saltB64 := base64.RawStdEncoding.EncodeToString(salt)
 	hashB64 := base64.RawStdEncoding.EncodeToString(hash)
-	return fmt.Sprintf("$scrypt$N=%d,r=%d,p=%d$%s$%s", scryptN, scryptR, scryptP, saltB64, hashB64), nil
+	encoded, err := json.Marshal(storedPasswordJSON{
+		KDF:  "scrypt",
+		N:    scryptN,
+		R:    scryptR,
+		P:    scryptP,
+		Salt: saltB64,
+		Hash: hashB64,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 func VerifyStoredPassword(encoded string, password []byte) (bool, error) {
@@ -46,6 +67,10 @@ func VerifyStoredPassword(encoded string, password []byte) (bool, error) {
 }
 
 func parseEncoded(encoded string) (n, r, p int, salt, hash []byte, err error) {
+	if strings.HasPrefix(strings.TrimSpace(encoded), "{") {
+		return parseJSONEncoded(encoded)
+	}
+
 	// format: $scrypt$N=<n>,r=<r>,p=<p>$<base64-salt>$<base64-hash>
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 5 || parts[0] != "" || parts[1] != "scrypt" {
@@ -73,4 +98,23 @@ func parseEncoded(encoded string) (n, r, p int, salt, hash []byte, err error) {
 		return 0, 0, 0, nil, nil, fmt.Errorf("storage: invalid hash encoding: %w", err)
 	}
 	return int(n64), int(r64), int(p64), salt, hash, nil
+}
+
+func parseJSONEncoded(encoded string) (n, r, p int, salt, hash []byte, err error) {
+	var doc storedPasswordJSON
+	if err := json.Unmarshal([]byte(encoded), &doc); err != nil {
+		return 0, 0, 0, nil, nil, fmt.Errorf("storage: invalid json format: %w", err)
+	}
+	if doc.KDF != "scrypt" {
+		return 0, 0, 0, nil, nil, fmt.Errorf("storage: unsupported kdf %q", doc.KDF)
+	}
+	salt, err = base64.RawStdEncoding.DecodeString(doc.Salt)
+	if err != nil {
+		return 0, 0, 0, nil, nil, fmt.Errorf("storage: invalid salt encoding: %w", err)
+	}
+	hash, err = base64.RawStdEncoding.DecodeString(doc.Hash)
+	if err != nil {
+		return 0, 0, 0, nil, nil, fmt.Errorf("storage: invalid hash encoding: %w", err)
+	}
+	return doc.N, doc.R, doc.P, salt, hash, nil
 }

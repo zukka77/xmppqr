@@ -24,7 +24,7 @@ This README is intentionally operational. It covers installation, configuration,
 Important caveats for operators right now:
 
 - There are no release artifacts or distro packages yet. Installation is from source.
-- The daemon still has developer bootstrap behavior: it creates or updates one local user on startup via `-dev-user` and `-dev-pass`.
+- The daemon can still create a developer bootstrap user via `-dev-user` and `-dev-pass`, but it no longer does so automatically.
 - The daemon requires an explicit TLS certificate and key. It does not generate development certificates.
 - The default database driver is in-memory. That is convenient for development, but it is not persistent and `xmppqrctl` intentionally refuses to manage users against it.
 - The project is moving quickly. Expect config and runtime behavior to continue changing.
@@ -102,11 +102,25 @@ For local testing, a self-signed certificate is fine. One simple manual flow is:
 install -d /etc/xmppqr/tls
 openssl req -x509 -newkey rsa:2048 -nodes \
   -days 30 \
-  -subj "/CN=example.com" \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost" \
   -keyout /etc/xmppqr/tls/key.pem \
   -out /etc/xmppqr/tls/cert.pem
 chmod 600 /etc/xmppqr/tls/key.pem
 ```
+
+If you want local clients to trust that `localhost` certificate through the system trust store, install the certificate, not the private key:
+
+```bash
+cp /etc/xmppqr/tls/cert.pem /usr/local/share/ca-certificates/xmppqr-localhost.crt
+update-ca-certificates
+```
+
+Notes:
+
+- Modern clients expect `localhost` to appear in `subjectAltName`; `CN=localhost` alone is not enough.
+- If you regenerate the self-signed certificate later, repeat the trust-store update step.
+- Some clients use their own certificate store rather than the OS trust store, so you may still need to import the certificate in the client itself.
 
 For real deployments, use your normal certificate management flow instead, for example Let's Encrypt or another ACME client. In that case, point `tls.cert_file` and `tls.key_file` at the live certificate and private key paths you already manage on the host, or copy/symlink them into `/etc/xmppqr/tls/`.
 
@@ -229,7 +243,8 @@ What that does by default:
 - uses `localhost` as the domain if none is configured
 - listens on `:5222` and `:5223`
 - uses in-memory storage
-- creates or updates a bootstrap user `test@localhost` with password `test`
+- uses `/etc/xmppqr/tls/cert.pem` and `/etc/xmppqr/tls/key.pem` unless overridden in config
+- does not create any users unless you explicitly pass `-dev-user`
 
 Configured run:
 
@@ -237,7 +252,7 @@ Configured run:
 xmppqrd -config /etc/xmppqr/xmppqrd.yaml -dev-user bootstrap -dev-pass 'change-me-now'
 ```
 
-Current bootstrap behavior is important: the daemon always seeds a user on startup. Until that changes, set `-dev-user` and `-dev-pass` deliberately and rotate or remove that account after initial setup.
+If you choose to use the bootstrap-user path, set `-dev-user` and `-dev-pass` deliberately and rotate or remove that account after initial setup.
 
 Useful listeners:
 

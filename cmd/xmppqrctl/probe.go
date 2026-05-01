@@ -49,6 +49,7 @@ func groupName(id uint16) string {
 }
 
 func cmdTLSProbe(args []string) int {
+	args = normalizeSinglePositionalArgs(args)
 	fs := flag.NewFlagSet("tls-probe", flag.ContinueOnError)
 	pq := fs.Bool("pq", true, "prefer PQ hybrid key exchange")
 	tls12 := fs.Bool("tls12", false, "set min version to TLS 1.2")
