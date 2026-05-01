@@ -1,3 +1,4 @@
+// Server is opaque transport for all x3dhpq namespaces; it does not interpret AIK signatures, DCs, audit chains, or pairing PAKE messages.
 package x3dhpq
 
 import (

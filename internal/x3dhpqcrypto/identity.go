@@ -4,14 +4,17 @@ package x3dhpqcrypto
 
 import "github.com/danielinux/xmppqr/internal/wolfcrypt"
 
-type IdentityKey struct {
+type IdentityKey = DeviceIdentityKey
+
+type DeviceIdentityKey struct {
 	PrivX25519  []byte
 	PubX25519   []byte
 	PrivEd25519 []byte
 	PubEd25519  []byte
+	PubMLDSA    []byte
 }
 
-func GenerateIdentity() (*IdentityKey, error) {
+func GenerateDeviceIdentity() (*DeviceIdentityKey, error) {
 	xPub, xPriv, err := wolfcrypt.GenerateX25519()
 	if err != nil {
 		return nil, err
@@ -20,10 +23,14 @@ func GenerateIdentity() (*IdentityKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &IdentityKey{
+	return &DeviceIdentityKey{
 		PrivX25519:  xPriv,
 		PubX25519:   xPub,
 		PrivEd25519: ePriv,
 		PubEd25519:  ePub,
 	}, nil
+}
+
+func GenerateIdentity() (*DeviceIdentityKey, error) {
+	return GenerateDeviceIdentity()
 }

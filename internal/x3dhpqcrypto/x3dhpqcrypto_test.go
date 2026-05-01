@@ -2,14 +2,29 @@
 package x3dhpqcrypto
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	"github.com/danielinux/xmppqr/internal/wolfcrypt"
 )
 
+// issueTestDC is a helper that generates an AIK, issues a DC for dik, and returns both.
+func issueTestDC(t *testing.T, dik *DeviceIdentityKey) (*AccountIdentityKey, *DeviceCertificate) {
+	t.Helper()
+	aik, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc, err := aik.IssueDeviceCert(dik, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return aik, dc
+}
+
 func TestIdentityRoundTrip(t *testing.T) {
-	id, err := GenerateIdentity()
+	id, err := GenerateDeviceIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,17 +43,18 @@ func TestIdentityRoundTrip(t *testing.T) {
 }
 
 func TestBundleRoundTrip(t *testing.T) {
-	id, err := GenerateIdentity()
+	id, err := GenerateDeviceIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := NewBundle(id, 2, 3)
+	aik, dc := issueTestDC(t, id)
+	b, err := NewBundle(id, dc, 2, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
+	b.AccountIdentity = aik
 	pub := b.PublicView()
 
-	// Verify SPK signature.
 	ok, err := wolfcrypt.Ed25519Verify(pub.IdentityPubEd25519, spkSignInput(pub.SPKPub, pub.SPKID), pub.SPKSig)
 	if err != nil {
 		t.Fatal(err)
@@ -55,27 +71,44 @@ func TestBundleRoundTrip(t *testing.T) {
 }
 
 func TestX3DH_PQ_Symmetric(t *testing.T) {
-	aliceID, err := GenerateIdentity()
+	aliceAIK, err := GenerateAccountIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobID, err := GenerateIdentity()
+	bobAIK, err := GenerateAccountIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobBundle, err := NewBundle(bobID, 1, 1)
+	aliceDIK, err := GenerateDeviceIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
+	bobDIK, err := GenerateDeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceDC, err := aliceAIK.IssueDeviceCert(aliceDIK, 1, DeviceFlagPrimary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobDC, err := bobAIK.IssueDeviceCert(bobDIK, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bobBundle, err := NewBundle(bobDIK, bobDC, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobBundle.AccountIdentity = bobAIK
 	bobPub := bobBundle.PublicView()
 
-	// Alice generates ephemeral key.
 	ephPub, ephPriv, err := wolfcrypt.GenerateX25519()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	aliceRK, aliceAD, kemCT, opkUsed, err := InitiateSession(aliceID, ephPriv, ephPub, bobPub, bobPub.OPKs[0].ID, bobPub.KEMPreKeys[0].ID)
+	aliceRK, _, kemCT, opkUsed, err := InitiateSession(aliceDIK, ephPriv, ephPub, bobPub, bobAIK.Public(), bobPub.OPKs[0].ID, bobPub.KEMPreKeys[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,11 +121,12 @@ func TestX3DH_PQ_Symmetric(t *testing.T) {
 		opkPriv = bobBundle.OneTimePreKeys[0].PrivX25519
 	}
 
-	bobRK, bobAD, err := RespondSession(
-		bobID,
+	bobRK, _, err := RespondSession(
+		bobDIK,
 		bobBundle.SignedPreKey.PrivX25519,
 		opkPriv,
-		aliceID.PubX25519,
+		aliceDC,
+		aliceAIK.Public(),
 		ephPub,
 		bobBundle.KEMPreKeys[0].PrivMLKEM,
 		kemCT,
@@ -101,28 +135,68 @@ func TestX3DH_PQ_Symmetric(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if string(aliceRK) != string(bobRK) {
+	if !bytes.Equal(aliceRK, bobRK) {
 		t.Fatal("root keys do not match")
 	}
-	// AD: alice builds IK_A||IK_B, bob builds IK_A||IK_B (peer||mine).
-	_ = aliceAD
-	_ = bobAD
+}
+
+func TestX3DH_PQ_UntrustedDeviceRejected(t *testing.T) {
+	realAIK, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAIK, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobDIK, err := GenerateDeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DC signed by otherAIK (not realAIK that alice has pinned)
+	bobDC, err := otherAIK.IssueDeviceCert(bobDIK, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobBundle, err := NewBundle(bobDIK, bobDC, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobBundle.AccountIdentity = otherAIK
+	bobPub := bobBundle.PublicView()
+
+	aliceDIK, err := GenerateDeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephPub, ephPriv, err := wolfcrypt.GenerateX25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, _, err = InitiateSession(aliceDIK, ephPriv, ephPub, bobPub, realAIK.Public(), 0, bobPub.KEMPreKeys[0].ID)
+	if err != ErrUntrustedDevice {
+		t.Fatalf("expected ErrUntrustedDevice, got %v", err)
+	}
 }
 
 func setupX3DH(t *testing.T) (aliceRK, bobRK, aliceAD, bobAD []byte, aliceEphPub []byte, bobBundle *Bundle) {
 	t.Helper()
-	aliceID, err := GenerateIdentity()
+	aliceDIK, err := GenerateDeviceIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobID, err := GenerateIdentity()
+	aliceAIK, aliceDC := issueTestDC(t, aliceDIK)
+	bobDIK, err := GenerateDeviceIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobBundle, err = NewBundle(bobID, 1, 0)
+	bobAIK, bobDC := issueTestDC(t, bobDIK)
+	bobBundle, err = NewBundle(bobDIK, bobDC, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	bobBundle.AccountIdentity = bobAIK
 	bobPub := bobBundle.PublicView()
 
 	ephPub, ephPriv, err := wolfcrypt.GenerateX25519()
@@ -131,60 +205,23 @@ func setupX3DH(t *testing.T) (aliceRK, bobRK, aliceAD, bobAD []byte, aliceEphPub
 	}
 	aliceEphPub = ephPub
 
-	aliceRK, aliceAD, _, _, err = InitiateSession(aliceID, ephPriv, ephPub, bobPub, 0, bobPub.KEMPreKeys[0].ID)
+	aliceRK, aliceAD, _, _, err = InitiateSession(aliceDIK, ephPriv, ephPub, bobPub, bobAIK.Public(), 0, bobPub.KEMPreKeys[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Need kemCT from a separate call for bob to use.
+	_, _, kemCT, _, err := InitiateSession(aliceDIK, ephPriv, ephPub, bobPub, bobAIK.Public(), 0, bobPub.KEMPreKeys[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	bobRK, bobAD, err = RespondSession(
-		bobID,
+		bobDIK,
 		bobBundle.SignedPreKey.PrivX25519,
 		nil,
-		aliceID.PubX25519,
-		ephPub,
-		bobBundle.KEMPreKeys[0].PrivMLKEM,
-		func() []byte {
-			_, kemCT, _, _, _ := InitiateSession(aliceID, ephPriv, ephPub, bobPub, 0, bobPub.KEMPreKeys[0].ID)
-			return kemCT
-		}(),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return
-}
-
-// buildSession builds a symmetric pair of ratchet states without the setupX3DH
-// helper complexity. Returns (aliceSend, bobRecv) and shared rootKey/ad.
-func buildSession(t *testing.T) (aliceSend *State, bobRecv *State, aliceKEMPub []byte, bobKEMPriv []byte) {
-	t.Helper()
-	aliceID, err := GenerateIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobID, err := GenerateIdentity()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobBundle, err := NewBundle(bobID, 1, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobPub := bobBundle.PublicView()
-
-	ephPub, ephPriv, err := wolfcrypt.GenerateX25519()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	aliceRK, aliceAD, kemCT, _, err := InitiateSession(aliceID, ephPriv, ephPub, bobPub, 0, bobPub.KEMPreKeys[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobRK, bobAD, err := RespondSession(
-		bobID,
-		bobBundle.SignedPreKey.PrivX25519,
-		nil,
-		aliceID.PubX25519,
+		aliceDC,
+		aliceAIK.Public(),
 		ephPub,
 		bobBundle.KEMPreKeys[0].PrivMLKEM,
 		kemCT,
@@ -192,25 +229,65 @@ func buildSession(t *testing.T) (aliceSend *State, bobRecv *State, aliceKEMPub [
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(aliceRK) != string(bobRK) {
+	return
+}
+
+func buildSession(t *testing.T) (aliceSend *State, bobRecv *State, aliceKEMPub []byte, bobKEMPriv []byte) {
+	t.Helper()
+	aliceDIK, err := GenerateDeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceAIK, aliceDC := issueTestDC(t, aliceDIK)
+	bobDIK, err := GenerateDeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobAIK, bobDC := issueTestDC(t, bobDIK)
+	bobBundle, err := NewBundle(bobDIK, bobDC, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobBundle.AccountIdentity = bobAIK
+	bobPub := bobBundle.PublicView()
+
+	ephPub, ephPriv, err := wolfcrypt.GenerateX25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aliceRK, aliceAD, kemCT, _, err := InitiateSession(aliceDIK, ephPriv, ephPub, bobPub, bobAIK.Public(), 0, bobPub.KEMPreKeys[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobRK, bobAD, err := RespondSession(
+		bobDIK,
+		bobBundle.SignedPreKey.PrivX25519,
+		nil,
+		aliceDC,
+		aliceAIK.Public(),
+		ephPub,
+		bobBundle.KEMPreKeys[0].PrivMLKEM,
+		kemCT,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(aliceRK, bobRK) {
 		t.Fatal("root keys mismatch in buildSession")
 	}
 
-	// Alice sends, Bob receives.
-	// Bob's receiving state uses bobRK and his SPK DH pair.
 	bobRecvDH := PrivPub{Priv: bobBundle.SignedPreKey.PrivX25519, Pub: bobBundle.SignedPreKey.PubX25519}
 	bobRecv, err = NewReceivingState(bobRK, bobAD, bobRecvDH)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Alice's sending state: peer DH = Bob's SPK pub.
 	aliceSend, err = NewSendingState(aliceRK, aliceAD, bobBundle.SignedPreKey.PubX25519)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Generate KEM keypair for Alice to advertise; Bob will need it for checkpoints.
 	kPub, kPriv, err := wolfcrypt.GenerateMLKEM768()
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +295,6 @@ func buildSession(t *testing.T) (aliceSend *State, bobRecv *State, aliceKEMPub [
 	aliceSend.KEMRecvPub = kPub
 	aliceSend.KEMRecvPriv = kPriv
 
-	// Bob needs a KEM pub to send checkpoints to Alice.
 	bkPub, bkPriv, err := wolfcrypt.GenerateMLKEM768()
 	if err != nil {
 		t.Fatal(err)
@@ -250,10 +326,6 @@ func TestRatchetSimpleExchange(t *testing.T) {
 func TestRatchetBidirectional(t *testing.T) {
 	alice, bob, _, _ := buildSession(t)
 
-	// After Bob decrypts a message he can build a send state back to Alice.
-	// We'll do 5 A→B then 5 B→A turns.
-
-	// A→B x5
 	headers := make([]*MessageHeader, 5)
 	cts := make([][]byte, 5)
 	for i := 0; i < 5; i++ {
@@ -274,10 +346,6 @@ func TestRatchetBidirectional(t *testing.T) {
 		}
 	}
 
-	// Now Bob replies using the ratchet state he has after decryption.
-	// Alice's receive state: her RK is post-send-ratchet, her SendingDH is the same
-	// fresh keypair she used for sending.  RemoteDHPub is set to the SPK (her last
-	// known DH pub before Bob's new keypair), so Bob's new DHPub triggers a recv ratchet.
 	aliceRecv := &State{
 		RK:                 alice.RK,
 		SendingDH:          alice.SendingDH,
@@ -317,7 +385,6 @@ func TestRatchetOutOfOrder(t *testing.T) {
 		cts[i] = ct
 	}
 
-	// Deliver in reverse.
 	for i := len(msgs) - 1; i >= 0; i-- {
 		pt, err := bob.DecryptMessage(headers[i], cts[i])
 		if err != nil {
@@ -332,7 +399,6 @@ func TestRatchetOutOfOrder(t *testing.T) {
 func TestKEMCheckpoint(t *testing.T) {
 	alice, bob, _, _ := buildSession(t)
 
-	// Give alice a KEM pub to encapsulate to (bob's KEM pub).
 	bkPub, bkPriv, err := wolfcrypt.GenerateMLKEM768()
 	if err != nil {
 		t.Fatal(err)
@@ -369,7 +435,6 @@ func TestTamperedCiphertextRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Flip a byte in the ciphertext body.
 	ct[0] ^= 0xFF
 	_, err = bob.DecryptMessage(hdr, ct)
 	if err == nil {

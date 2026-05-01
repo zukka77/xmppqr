@@ -8,12 +8,14 @@ import (
 )
 
 const (
-	infoX3DH           = "X3DHPQ-X3DH-PQ-v0"
-	infoRootKey        = "X3DHPQ-RootKey-v0"
-	infoHybridRoot     = "X3DHPQ-HybridRoot-v0"
-	infoTripleRatchet  = "X3DHPQ-TripleRatchet-v0"
-	infoMessageKey     = "X3DHPQ-MessageKey-v0"
+	infoX3DH          = "X3DHPQ-X3DH-PQ-v0"
+	infoRootKey       = "X3DHPQ-RootKey-v0"
+	infoHybridRoot    = "X3DHPQ-HybridRoot-v0"
+	infoTripleRatchet = "X3DHPQ-TripleRatchet-v0"
+	infoMessageKey    = "X3DHPQ-MessageKey-v0"
 )
+
+var ErrUntrustedDevice = errors.New("x3dhpqcrypto: device certificate not signed by expected AIK")
 
 // hkdf64 derives 64 bytes using HKDF-SHA512 with a zero salt.
 func hkdf64(salt, ikm []byte, info string) ([]byte, error) {
@@ -52,19 +54,30 @@ func hkdf44(salt, ikm []byte, info string) ([]byte, error) {
 }
 
 // InitiateSession performs PQXDH key agreement as the initiator (Alice).
-// Returns rootKey (64 bytes, first 32=RK second 32=initial CK), ad, kemCiphertext.
+// peer.DeviceCert is verified against peerAIK before any DH or KEM is performed.
+// AD folds in both AIK public keys to bind the session to both identities.
 func InitiateSession(
-	myIdentity *IdentityKey,
+	myDIK *DeviceIdentityKey,
 	myEphemX25519Priv, myEphemX25519Pub []byte,
 	peer *PublicBundle,
+	peerAIK *AccountIdentityPub,
 	opkID uint32,
 	kemPreKeyID uint32,
 ) (rootKey []byte, ad []byte, kemCiphertext []byte, opkUsed bool, err error) {
-	if myIdentity == nil || peer == nil {
+	if myDIK == nil || peer == nil {
 		return nil, nil, nil, false, errors.New("x3dhpqcrypto: nil argument")
 	}
 
-	dh1, err := wolfcrypt.X25519SharedSecret(myIdentity.PrivX25519, peer.SPKPub)
+	if peerAIK != nil {
+		if peer.DeviceCert == nil {
+			return nil, nil, nil, false, ErrUntrustedDevice
+		}
+		if err := peer.DeviceCert.Verify(peerAIK); err != nil {
+			return nil, nil, nil, false, err
+		}
+	}
+
+	dh1, err := wolfcrypt.X25519SharedSecret(myDIK.PrivX25519, peer.SPKPub)
 	if err != nil {
 		return nil, nil, nil, false, err
 	}
@@ -82,8 +95,7 @@ func InitiateSession(
 	material = append(material, dh2...)
 	material = append(material, dh3...)
 
-	// DH4: optional OPK
-	var opk *PublicOPK
+	var opk *PublicOneTimePreKey
 	if opkID != 0 {
 		for _, o := range peer.OPKs {
 			if o.ID == opkID {
@@ -101,7 +113,6 @@ func InitiateSession(
 		opkUsed = true
 	}
 
-	// KEM: find the KEM prekey
 	var kemPub []byte
 	for _, k := range peer.KEMPreKeys {
 		if k.ID == kemPreKeyID {
@@ -123,31 +134,45 @@ func InitiateSession(
 		return nil, nil, nil, false, err
 	}
 
-	ad = append(myIdentity.PubX25519, peer.IdentityPubX25519...)
+	// AD: initiator_DIK_pub || responder_DIK_pub (symmetric with RespondSession).
+	ad = append(myDIK.PubX25519, peer.IdentityPubX25519...)
 	return rk, ad, ct, opkUsed, nil
 }
 
 // RespondSession performs PQXDH key agreement as the responder (Bob).
-// mySPK_OPK_priv is the private key of the OPK (if used, else nil).
+// peerDC is verified against peerAIK before any computation.
 func RespondSession(
-	myIdentity *IdentityKey,
+	myDIK *DeviceIdentityKey,
 	mySPKPriv []byte,
 	mySPKOPKPriv []byte,
-	peerIdentityPubX25519, peerEphemPub []byte,
+	peerDC *DeviceCertificate,
+	peerAIK *AccountIdentityPub,
+	peerEphemPub []byte,
 	kemPreKeyPriv []byte,
 	kemCiphertext []byte,
 ) (rootKey []byte, ad []byte, err error) {
-	// DH1 = X25519(SPK_B_priv, IK_A_pub)
+	if peerAIK != nil {
+		if peerDC == nil {
+			return nil, nil, ErrUntrustedDevice
+		}
+		if err := peerDC.Verify(peerAIK); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	var peerIdentityPubX25519 []byte
+	if peerDC != nil {
+		peerIdentityPubX25519 = peerDC.DIKPubX25519
+	}
+
 	dh1, err := wolfcrypt.X25519SharedSecret(mySPKPriv, peerIdentityPubX25519)
 	if err != nil {
 		return nil, nil, err
 	}
-	// DH2 = X25519(IK_B_priv, EK_A_pub)
-	dh2, err := wolfcrypt.X25519SharedSecret(myIdentity.PrivX25519, peerEphemPub)
+	dh2, err := wolfcrypt.X25519SharedSecret(myDIK.PrivX25519, peerEphemPub)
 	if err != nil {
 		return nil, nil, err
 	}
-	// DH3 = X25519(SPK_B_priv, EK_A_pub)
 	dh3, err := wolfcrypt.X25519SharedSecret(mySPKPriv, peerEphemPub)
 	if err != nil {
 		return nil, nil, err
@@ -158,7 +183,6 @@ func RespondSession(
 	material = append(material, dh2...)
 	material = append(material, dh3...)
 
-	// DH4: optional OPK
 	if mySPKOPKPriv != nil {
 		dh4, err2 := wolfcrypt.X25519SharedSecret(mySPKOPKPriv, peerEphemPub)
 		if err2 != nil {
@@ -167,7 +191,6 @@ func RespondSession(
 		material = append(material, dh4...)
 	}
 
-	// KEM decapsulate
 	kemSS, err := wolfcrypt.MLKEM768Decapsulate(kemPreKeyPriv, kemCiphertext)
 	if err != nil {
 		return nil, nil, err
@@ -179,6 +202,11 @@ func RespondSession(
 		return nil, nil, err
 	}
 
-	ad = append(peerIdentityPubX25519, myIdentity.PubX25519...)
+	// AD: initiator_DIK_pub || responder_DIK_pub (symmetric with InitiateSession).
+	if peerIdentityPubX25519 != nil {
+		ad = append(peerIdentityPubX25519, myDIK.PubX25519...)
+	} else {
+		ad = myDIK.PubX25519
+	}
 	return rk, ad, nil
 }

@@ -42,6 +42,8 @@ func DefaultServer() *Features {
 			"urn:xmpp:blocking",
 			"vcard-temp",
 			"urn:xmppqr:x3dhpq:0",
+			"urn:xmppqr:x3dhpq:devicelist:0+notify",
+			"urn:xmppqr:x3dhpq:audit:0+notify",
 			"urn:ietf:params:xml:ns:xmpp-session",
 			"jabber:iq:version",
 			"jabber:iq:last",

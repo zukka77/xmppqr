@@ -70,6 +70,9 @@ func TestDefaultServerHasLegacyFeatures(t *testing.T) {
 		"jabber:iq:version",
 		"jabber:iq:last",
 		"urn:xmpp:time",
+		"urn:xmppqr:x3dhpq:0",
+		"urn:xmppqr:x3dhpq:devicelist:0+notify",
+		"urn:xmppqr:x3dhpq:audit:0+notify",
 	}
 	for _, ns := range required {
 		found := false
