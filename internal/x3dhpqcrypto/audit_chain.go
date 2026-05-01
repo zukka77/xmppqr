@@ -9,12 +9,13 @@ import (
 )
 
 var (
-	ErrAuditBadSig           = errors.New("audit: signature verification failed")
-	ErrAuditBadChain         = errors.New("audit: hash chain link broken")
-	ErrAuditBadSeq           = errors.New("audit: sequence number gap or out of order")
-	ErrAuditBadGenesis       = errors.New("audit: first entry must have zero PrevHash")
-	ErrAuditTimestampRegress = errors.New("audit: timestamp regressed")
-	ErrAuditMalformed        = errors.New("audit: malformed wire encoding")
+	ErrAuditBadSig                = errors.New("audit: signature verification failed")
+	ErrAuditBadChain              = errors.New("audit: hash chain link broken")
+	ErrAuditBadSeq                = errors.New("audit: sequence number gap or out of order")
+	ErrAuditBadGenesis            = errors.New("audit: first entry must have zero PrevHash")
+	ErrAuditTimestampRegress      = errors.New("audit: timestamp regressed")
+	ErrAuditMalformed             = errors.New("audit: malformed wire encoding")
+	ErrAuditMissingMLDSASignature = errors.New("audit: missing ML-DSA-65 signature (legacy Ed25519-only deprecated)")
 )
 
 type AuditAction uint8
@@ -42,12 +43,13 @@ func (a AuditAction) String() string {
 }
 
 type AuditEntry struct {
-	Seq       uint64
-	PrevHash  [32]byte
-	Action    AuditAction
-	Payload   []byte
-	Timestamp int64
-	Signature []byte
+	Seq            uint64
+	PrevHash       [32]byte
+	Action         AuditAction
+	Payload        []byte
+	Timestamp      int64
+	Signature      []byte
+	MLDSASignature []byte
 }
 
 var auditPrefix = []byte("X3DHPQ-Audit-v1\x00")
@@ -74,12 +76,16 @@ func (e *AuditEntry) SignedPart() []byte {
 
 func (e *AuditEntry) Marshal() []byte {
 	sp := e.SignedPart()
-	out := make([]byte, len(sp)+2+len(e.Signature))
+	out := make([]byte, len(sp)+2+len(e.Signature)+2+len(e.MLDSASignature))
 	copy(out, sp)
 	off := len(sp)
 	binary.BigEndian.PutUint16(out[off:], uint16(len(e.Signature)))
 	off += 2
 	copy(out[off:], e.Signature)
+	off += len(e.Signature)
+	binary.BigEndian.PutUint16(out[off:], uint16(len(e.MLDSASignature)))
+	off += 2
+	copy(out[off:], e.MLDSASignature)
 	return out
 }
 
@@ -88,11 +94,16 @@ func (e *AuditEntry) Hash() [32]byte {
 }
 
 func (e *AuditEntry) Verify(aikPub *AccountIdentityPub) error {
-	ok, err := wolfcrypt.Ed25519Verify(aikPub.PubEd25519, e.SignedPart(), e.Signature)
-	if err != nil {
+	if len(e.Signature) == 0 || len(e.MLDSASignature) == 0 {
+		return ErrAuditMissingMLDSASignature
+	}
+	sp := e.SignedPart()
+	ok, err := wolfcrypt.Ed25519Verify(aikPub.PubEd25519, sp, e.Signature)
+	if err != nil || !ok {
 		return ErrAuditBadSig
 	}
-	if !ok {
+	ok, err = wolfcrypt.MLDSA65Verify(aikPub.PubMLDSA, sp, e.MLDSASignature)
+	if err != nil || !ok {
 		return ErrAuditBadSig
 	}
 	return nil
@@ -108,17 +119,23 @@ func (a *AccountIdentityKey) AppendAudit(prev *AuditEntry, action AuditAction, p
 		e.Seq = prev.Seq + 1
 		e.PrevHash = prev.Hash()
 	}
-	sig, err := wolfcrypt.Ed25519Sign(a.PrivEd25519, e.SignedPart())
+	sp := e.SignedPart()
+	sig, err := wolfcrypt.Ed25519Sign(a.PrivEd25519, sp)
 	if err != nil {
 		return nil, err
 	}
 	e.Signature = sig
+	mlSig, err := wolfcrypt.MLDSA65Sign(a.PrivMLDSA, sp)
+	if err != nil {
+		return nil, err
+	}
+	e.MLDSASignature = mlSig
 	return e, nil
 }
 
 func UnmarshalAuditEntry(b []byte) (*AuditEntry, error) {
-	// minimum: prefix(16) + seq(8) + prevhash(32) + action(1) + payloadlen(4) + timestamp(8) + siglen(2)
-	minSize := len(auditPrefix) + 8 + 32 + 1 + 4 + 8 + 2
+	// minimum: prefix(16) + seq(8) + prevhash(32) + action(1) + payloadlen(4) + timestamp(8) + siglen(2) + mlsiglen(2)
+	minSize := len(auditPrefix) + 8 + 32 + 1 + 4 + 8 + 2 + 2
 	if len(b) < minSize {
 		return nil, ErrAuditMalformed
 	}
@@ -157,6 +174,22 @@ func UnmarshalAuditEntry(b []byte) (*AuditEntry, error) {
 	if sigLen > 0 {
 		e.Signature = make([]byte, sigLen)
 		copy(e.Signature, b[off:off+sigLen])
+	}
+	off += sigLen
+	if off+2 > len(b) {
+		return nil, ErrAuditMalformed
+	}
+	mlSigLen := int(binary.BigEndian.Uint16(b[off:]))
+	off += 2
+	if off+mlSigLen > len(b) {
+		return nil, ErrAuditMalformed
+	}
+	if mlSigLen > 0 {
+		e.MLDSASignature = make([]byte, mlSigLen)
+		copy(e.MLDSASignature, b[off:off+mlSigLen])
+	}
+	if sigLen == 0 || mlSigLen == 0 {
+		return nil, ErrAuditMissingMLDSASignature
 	}
 	return e, nil
 }

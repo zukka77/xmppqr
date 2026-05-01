@@ -189,3 +189,62 @@ func TestFind(t *testing.T) {
 		t.Fatal("Find(999) should return nil")
 	}
 }
+
+func TestDeviceListVerifyMissingMLDSARejected(t *testing.T) {
+	aik, _ := GenerateAccountIdentity()
+	entries := makeEntries(t, aik, []uint32{1})
+	dl, err := aik.IssueDeviceList(1, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl.MLDSASignature = nil
+	err = dl.Verify(aik.Public())
+	if !errors.Is(err, ErrDeviceListMissingMLDSASignature) {
+		t.Fatalf("expected ErrDeviceListMissingMLDSASignature, got %v", err)
+	}
+}
+
+func TestDeviceListVerifyTamperedMLDSARejected(t *testing.T) {
+	aik, _ := GenerateAccountIdentity()
+	entries := makeEntries(t, aik, []uint32{1})
+	dl, err := aik.IssueDeviceList(1, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl.MLDSASignature[0] ^= 0xFF
+	err = dl.Verify(aik.Public())
+	if err == nil {
+		t.Fatal("expected error for tampered ML-DSA signature")
+	}
+}
+
+func TestDeviceListUnmarshalLegacyRejected(t *testing.T) {
+	aik, _ := GenerateAccountIdentity()
+	entries := makeEntries(t, aik, []uint32{1})
+	dl, err := aik.IssueDeviceList(1, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := dl.Marshal()
+	// Zero out the mldsa_sig_len field: it sits right after the ed25519 sig bytes.
+	// Find the position: everything up to and including the ed25519 sig, then 2 bytes for mldsa len.
+	// We'll craft the wire by appending mldsa_sig_len=0 ourselves.
+	// The easiest approach: marshal normally, then build a legacy buffer where mldsa_sig_len=0.
+	_ = good
+	// Build legacy manually: same content but truncate after ed25519 sig and append uint16(0).
+	normal := dl.Marshal()
+	// Find the offset after mldsa sig = len(normal) - 2 - len(mldsa sig).
+	// Reconstruct: strip mldsa_sig_len+mldsa_sig from end, then append 0x00 0x00.
+	mlSigLen := len(dl.MLDSASignature)
+	truncated := normal[:len(normal)-mlSigLen]
+	// truncated ends with uint16(mlSigLen) — replace those 2 bytes with 0x00 0x00.
+	legacy := make([]byte, len(truncated))
+	copy(legacy, truncated)
+	legacy[len(legacy)-2] = 0
+	legacy[len(legacy)-1] = 0
+
+	_, err = UnmarshalDeviceList(legacy)
+	if !errors.Is(err, ErrDeviceListMissingMLDSASignature) {
+		t.Fatalf("expected ErrDeviceListMissingMLDSASignature for legacy wire, got %v", err)
+	}
+}

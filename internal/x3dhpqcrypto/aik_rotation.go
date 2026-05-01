@@ -10,18 +10,20 @@ import (
 )
 
 var (
-	ErrRotationBadSig       = errors.New("rotation: signature verification failed")
-	ErrRotationMalformed    = errors.New("rotation: malformed wire encoding")
-	ErrRotationReasonTooLong = errors.New("rotation: reason exceeds 512 bytes")
+	ErrRotationBadSig               = errors.New("rotation: signature verification failed")
+	ErrRotationMalformed            = errors.New("rotation: malformed wire encoding")
+	ErrRotationReasonTooLong        = errors.New("rotation: reason exceeds 512 bytes")
+	ErrRotationMissingMLDSASignature = errors.New("rotation: missing ML-DSA-65 signature (legacy Ed25519-only deprecated)")
 )
 
 type RotationPointer struct {
-	Version   uint16
-	OldAIKPub *AccountIdentityPub
-	NewAIKPub *AccountIdentityPub
-	RotatedAt int64
-	Reason    string
-	Signature []byte
+	Version        uint16
+	OldAIKPub      *AccountIdentityPub
+	NewAIKPub      *AccountIdentityPub
+	RotatedAt      int64
+	Reason         string
+	Signature      []byte
+	MLDSASignature []byte
 }
 
 var rotationPrefix = []byte("X3DHPQ-Rotation-v1\x00")
@@ -68,20 +70,31 @@ func (oldAIK *AccountIdentityKey) NewRotation(newAIK *AccountIdentityPub, reason
 		RotatedAt: time.Now().Unix(),
 		Reason:    reason,
 	}
-	sig, err := wolfcrypt.Ed25519Sign(oldAIK.PrivEd25519, rp.SignedPart())
+	sp := rp.SignedPart()
+	sig, err := wolfcrypt.Ed25519Sign(oldAIK.PrivEd25519, sp)
 	if err != nil {
 		return nil, err
 	}
 	rp.Signature = sig
+	mlSig, err := wolfcrypt.MLDSA65Sign(oldAIK.PrivMLDSA, sp)
+	if err != nil {
+		return nil, err
+	}
+	rp.MLDSASignature = mlSig
 	return rp, nil
 }
 
 func (rp *RotationPointer) Verify() error {
-	ok, err := wolfcrypt.Ed25519Verify(rp.OldAIKPub.PubEd25519, rp.SignedPart(), rp.Signature)
-	if err != nil {
+	if len(rp.Signature) == 0 || len(rp.MLDSASignature) == 0 {
+		return ErrRotationMissingMLDSASignature
+	}
+	sp := rp.SignedPart()
+	ok, err := wolfcrypt.Ed25519Verify(rp.OldAIKPub.PubEd25519, sp, rp.Signature)
+	if err != nil || !ok {
 		return ErrRotationBadSig
 	}
-	if !ok {
+	ok, err = wolfcrypt.MLDSA65Verify(rp.OldAIKPub.PubMLDSA, sp, rp.MLDSASignature)
+	if err != nil || !ok {
 		return ErrRotationBadSig
 	}
 	return nil
@@ -89,12 +102,16 @@ func (rp *RotationPointer) Verify() error {
 
 func (rp *RotationPointer) Marshal() []byte {
 	sp := rp.SignedPart()
-	out := make([]byte, len(sp)+2+len(rp.Signature))
+	out := make([]byte, len(sp)+2+len(rp.Signature)+2+len(rp.MLDSASignature))
 	copy(out, sp)
 	off := len(sp)
 	binary.BigEndian.PutUint16(out[off:], uint16(len(rp.Signature)))
 	off += 2
 	copy(out[off:], rp.Signature)
+	off += len(rp.Signature)
+	binary.BigEndian.PutUint16(out[off:], uint16(len(rp.MLDSASignature)))
+	off += 2
+	copy(out[off:], rp.MLDSASignature)
 	return out
 }
 
@@ -167,6 +184,15 @@ func UnmarshalRotationPointer(b []byte) (*RotationPointer, error) {
 	}
 	rp.Signature = sigBytes
 
+	mlSigBytes, err := readField()
+	if err != nil {
+		return nil, err
+	}
+	rp.MLDSASignature = mlSigBytes
+
+	if len(rp.Signature) == 0 || len(rp.MLDSASignature) == 0 {
+		return nil, ErrRotationMissingMLDSASignature
+	}
 	return rp, nil
 }
 
@@ -190,11 +216,17 @@ func (newAIK *AccountIdentityKey) ReissueDeviceCerts(devices []DeviceReissueInpu
 			CreatedAt:     time.Now().Unix(),
 			Flags:         d.Flags,
 		}
-		sig, err := wolfcrypt.Ed25519Sign(newAIK.PrivEd25519, dc.SignedPart())
+		sp := dc.SignedPart()
+		sig, err := wolfcrypt.Ed25519Sign(newAIK.PrivEd25519, sp)
+		if err != nil {
+			return nil, err
+		}
+		mlSig, err := wolfcrypt.MLDSA65Sign(newAIK.PrivMLDSA, sp)
 		if err != nil {
 			return nil, err
 		}
 		dc.Signature = sig
+		dc.MLDSASignature = mlSig
 		out = append(out, dc)
 	}
 	return out, nil
@@ -221,11 +253,17 @@ func (oldAIK *AccountIdentityKey) ApplyRotation(prev *AuditEntry, reason string,
 	}
 	pointer.RotatedAt = timestamp
 	// Re-sign with the corrected timestamp.
-	sig, err := wolfcrypt.Ed25519Sign(oldAIK.PrivEd25519, pointer.SignedPart())
+	sp := pointer.SignedPart()
+	sig, err := wolfcrypt.Ed25519Sign(oldAIK.PrivEd25519, sp)
 	if err != nil {
 		return nil, err
 	}
 	pointer.Signature = sig
+	mlSig, err := wolfcrypt.MLDSA65Sign(oldAIK.PrivMLDSA, sp)
+	if err != nil {
+		return nil, err
+	}
+	pointer.MLDSASignature = mlSig
 
 	payload := PayloadRotateAIK(newAIK.Public())
 	entry, err := oldAIK.AppendAudit(prev, AuditActionRotateAIK, payload, timestamp)

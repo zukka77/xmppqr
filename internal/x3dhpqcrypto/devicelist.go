@@ -14,6 +14,7 @@ import (
 var ErrDeviceListRollback = errors.New("devicelist: version not greater than previous")
 var ErrDeviceListBadSig = errors.New("devicelist: signature verification failed")
 var ErrDeviceListMalformed = errors.New("devicelist: malformed wire encoding")
+var ErrDeviceListMissingMLDSASignature = errors.New("devicelist: missing ML-DSA-65 signature (legacy Ed25519-only deprecated)")
 
 type DeviceListEntry struct {
 	DeviceID uint32
@@ -23,10 +24,11 @@ type DeviceListEntry struct {
 }
 
 type DeviceList struct {
-	Version   uint64
-	IssuedAt  int64
-	Devices   []DeviceListEntry
-	Signature []byte
+	Version        uint64
+	IssuedAt       int64
+	Devices        []DeviceListEntry
+	Signature      []byte
+	MLDSASignature []byte
 }
 
 func (a *AccountIdentityKey) IssueDeviceList(version uint64, devices []DeviceListEntry) (*DeviceList, error) {
@@ -46,16 +48,25 @@ func (a *AccountIdentityKey) IssueDeviceList(version uint64, devices []DeviceLis
 		return nil, err
 	}
 	dl.Signature = sig
+	mlSig, err := wolfcrypt.MLDSA65Sign(a.PrivMLDSA, sp)
+	if err != nil {
+		return nil, err
+	}
+	dl.MLDSASignature = mlSig
 	return dl, nil
 }
 
 func (dl *DeviceList) Verify(aikPub *AccountIdentityPub) error {
+	if len(dl.Signature) == 0 || len(dl.MLDSASignature) == 0 {
+		return ErrDeviceListMissingMLDSASignature
+	}
 	sp := dl.SignedPart()
 	ok, err := wolfcrypt.Ed25519Verify(aikPub.PubEd25519, sp, dl.Signature)
-	if err != nil {
+	if err != nil || !ok {
 		return ErrDeviceListBadSig
 	}
-	if !ok {
+	ok, err = wolfcrypt.MLDSA65Verify(aikPub.PubMLDSA, sp, dl.MLDSASignature)
+	if err != nil || !ok {
 		return ErrDeviceListBadSig
 	}
 	return nil
@@ -114,6 +125,7 @@ func (dl *DeviceList) SignedPart() []byte {
 
 func (dl *DeviceList) Marshal() []byte {
 	sigLen := len(dl.Signature)
+	mlSigLen := len(dl.MLDSASignature)
 	size := 2 + 8 + 8 + 2
 	entrySizes := make([][]byte, len(dl.Devices))
 	for i, e := range dl.Devices {
@@ -121,10 +133,10 @@ func (dl *DeviceList) Marshal() []byte {
 		entrySizes[i] = cm
 		size += 4 + 8 + 1 + 4 + len(cm)
 	}
-	size += 2 + sigLen
+	size += 2 + sigLen + 2 + mlSigLen
 	out := make([]byte, size)
 	off := 0
-	binary.BigEndian.PutUint16(out[off:], 1) // version_marker
+	binary.BigEndian.PutUint16(out[off:], 1)
 	off += 2
 	binary.BigEndian.PutUint64(out[off:], dl.Version)
 	off += 8
@@ -148,6 +160,10 @@ func (dl *DeviceList) Marshal() []byte {
 	binary.BigEndian.PutUint16(out[off:], uint16(sigLen))
 	off += 2
 	copy(out[off:], dl.Signature)
+	off += sigLen
+	binary.BigEndian.PutUint16(out[off:], uint16(mlSigLen))
+	off += 2
+	copy(out[off:], dl.MLDSASignature)
 	return out
 }
 
@@ -204,6 +220,22 @@ func UnmarshalDeviceList(b []byte) (*DeviceList, error) {
 	if sigLen > 0 {
 		dl.Signature = make([]byte, sigLen)
 		copy(dl.Signature, b[off:off+sigLen])
+	}
+	off += sigLen
+	if off+2 > len(b) {
+		return nil, ErrDeviceListMalformed
+	}
+	mlSigLen := int(binary.BigEndian.Uint16(b[off:]))
+	off += 2
+	if off+mlSigLen > len(b) {
+		return nil, ErrDeviceListMalformed
+	}
+	if mlSigLen > 0 {
+		dl.MLDSASignature = make([]byte, mlSigLen)
+		copy(dl.MLDSASignature, b[off:off+mlSigLen])
+	}
+	if sigLen == 0 || mlSigLen == 0 {
+		return nil, ErrDeviceListMissingMLDSASignature
 	}
 	return dl, nil
 }

@@ -176,14 +176,11 @@ func PaperKeyDecode(paper string) (string, error) {
 }
 
 func serializeAIK(aik *AccountIdentityKey) []byte {
-	privMLDSA := []byte{}
-	pubMLDSA := aik.PubMLDSA
-
 	size := 2 + // version
 		2 + len(aik.PrivEd25519) +
 		2 + len(aik.PubEd25519) +
-		2 + len(privMLDSA) +
-		2 + len(pubMLDSA)
+		2 + len(aik.PrivMLDSA) +
+		2 + len(aik.PubMLDSA)
 
 	buf := make([]byte, size)
 	off := 0
@@ -201,13 +198,14 @@ func serializeAIK(aik *AccountIdentityKey) []byte {
 	copy(buf[off:], aik.PubEd25519)
 	off += len(aik.PubEd25519)
 
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(privMLDSA)))
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(aik.PrivMLDSA)))
 	off += 2
-	off += len(privMLDSA)
+	copy(buf[off:], aik.PrivMLDSA)
+	off += len(aik.PrivMLDSA)
 
-	binary.BigEndian.PutUint16(buf[off:], uint16(len(pubMLDSA)))
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(aik.PubMLDSA)))
 	off += 2
-	copy(buf[off:], pubMLDSA)
+	copy(buf[off:], aik.PubMLDSA)
 
 	return buf
 }
@@ -245,7 +243,7 @@ func deserializeAIK(buf []byte) (*AccountIdentityKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = readField() // privMLDSA reserved
+	privMLDSA, err := readField()
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +255,9 @@ func deserializeAIK(buf []byte) (*AccountIdentityKey, error) {
 	aik := &AccountIdentityKey{
 		PrivEd25519: privEd,
 		PubEd25519:  pubEd,
+	}
+	if len(privMLDSA) > 0 {
+		aik.PrivMLDSA = privMLDSA
 	}
 	if len(pubMLDSA) > 0 {
 		aik.PubMLDSA = pubMLDSA

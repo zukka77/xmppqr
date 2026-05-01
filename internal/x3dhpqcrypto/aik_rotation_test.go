@@ -2,6 +2,7 @@
 package x3dhpqcrypto
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -238,6 +239,25 @@ func TestDefaultPolicyIsStrict(t *testing.T) {
 	}
 	if !requireReverify {
 		t.Fatal("expected requireReverify=true")
+	}
+}
+
+func TestRotationVerifyMissingMLDSARejected(t *testing.T) {
+	oldAIK, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newAIK, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := oldAIK.NewRotation(newAIK.Public(), "missing mldsa test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp.MLDSASignature = nil
+	if got := rp.Verify(); !errors.Is(got, ErrRotationMissingMLDSASignature) {
+		t.Fatalf("expected ErrRotationMissingMLDSASignature, got %v", got)
 	}
 }
 

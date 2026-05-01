@@ -5,8 +5,11 @@
 package x3dhpqcrypto
 
 import (
+	"bytes"
 	"encoding/hex"
 	"testing"
+
+	"github.com/danielinux/xmppqr/internal/wolfcrypt"
 )
 
 // fixedEd25519Pub is a hardcoded 32-byte Ed25519 public key used as a test fixture.
@@ -18,16 +21,19 @@ var fixedEd25519Pub = []byte{
 	0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 }
 
-// A.1 — AIK fingerprint computation.
-// Input: PubEd25519 = 0x0102…0x20 (32 bytes), PubMLDSA = nil (v1).
+// A.1 — AIK fingerprint computation (hybrid, Wave 20).
+// Input: PubEd25519 = 0x0102…0x20 (32 bytes),
+//        PubMLDSA   = 0xA5 x 1952 bytes (fixed test pattern, NOT a real ML-DSA-65 key).
 // Fingerprint = hex(BLAKE2b-160(Marshal())[:15]) in 6 groups of 5.
-// Marshal() encoding: uint16(1) | uint8(0) | 32-byte Ed25519 pub
-const wantAIKFingerprint = "CEC21 253B5 4FF48 ECFAB 9D737 EE8EB"
+// Marshal() encoding: uint16(1) | uint8(1) | 32-byte Ed25519 pub | 1952-byte ML-DSA-65 pub
+//   total 1987 bytes.
+const wantAIKFingerprint = "7AD37 1A1A3 67A62 B6533 1BC5A 2204C"
 
 func TestVectorA1_AIKFingerprint(t *testing.T) {
+	fixedMLDSAPub := bytes.Repeat([]byte{0xA5}, wolfcrypt.MLDSA65PubSize)
 	pub := &AccountIdentityPub{
 		PubEd25519: fixedEd25519Pub,
-		PubMLDSA:   nil,
+		PubMLDSA:   fixedMLDSAPub,
 	}
 	got := pub.Fingerprint()
 	if got != wantAIKFingerprint {

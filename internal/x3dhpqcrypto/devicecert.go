@@ -9,6 +9,11 @@ import (
 	"github.com/danielinux/xmppqr/internal/wolfcrypt"
 )
 
+var (
+	ErrDCMissingMLDSASignature = errors.New("devicecert: missing ML-DSA-65 signature (Ed25519-only certs are deprecated)")
+	ErrInvalidDeviceCert       = errors.New("devicecert: invalid certificate signature")
+)
+
 const (
 	DeviceFlagPrimary = 1 << 0
 )
@@ -18,14 +23,13 @@ type DeviceCertificate struct {
 	DeviceID       uint32
 	DIKPubX25519   []byte
 	DIKPubEd25519  []byte
-	DIKPubMLDSA    []byte // reserved; nil for v1
-	CreatedAt      int64  // unix seconds
+	DIKPubMLDSA    []byte
+	CreatedAt      int64
 	Flags          uint8
-	Signature      []byte // Ed25519 sig by AIK over SignedPart
-	MLDSASignature []byte // reserved; nil for v1
+	Signature      []byte
+	MLDSASignature []byte
 }
 
-// SignedPart returns the canonical bytes signed by the AIK.
 func (dc *DeviceCertificate) SignedPart() []byte {
 	out := make([]byte, 2+4+2+len(dc.DIKPubEd25519)+2+len(dc.DIKPubX25519)+2+len(dc.DIKPubMLDSA)+8+1)
 	off := 0
@@ -61,31 +65,42 @@ func (a *AccountIdentityKey) IssueDeviceCert(d *DeviceIdentityKey, deviceID uint
 		CreatedAt:     time.Now().Unix(),
 		Flags:         flags,
 	}
-	sig, err := wolfcrypt.Ed25519Sign(a.PrivEd25519, dc.SignedPart())
+	sp := dc.SignedPart()
+	sig, err := wolfcrypt.Ed25519Sign(a.PrivEd25519, sp)
+	if err != nil {
+		return nil, err
+	}
+	mlSig, err := wolfcrypt.MLDSA65Sign(a.PrivMLDSA, sp)
 	if err != nil {
 		return nil, err
 	}
 	dc.Signature = sig
+	dc.MLDSASignature = mlSig
 	return dc, nil
 }
 
 func (dc *DeviceCertificate) Verify(aikPub *AccountIdentityPub) error {
-	ok, err := wolfcrypt.Ed25519Verify(aikPub.PubEd25519, dc.SignedPart(), dc.Signature)
+	if len(dc.Signature) == 0 || len(dc.MLDSASignature) == 0 {
+		return ErrDCMissingMLDSASignature
+	}
+	sp := dc.SignedPart()
+	ok, err := wolfcrypt.Ed25519Verify(aikPub.PubEd25519, sp, dc.Signature)
 	if err != nil {
-		return err
+		return ErrInvalidDeviceCert
 	}
 	if !ok {
-		return ErrUntrustedDevice
+		return ErrInvalidDeviceCert
+	}
+	ok, err = wolfcrypt.MLDSA65Verify(aikPub.PubMLDSA, sp, dc.MLDSASignature)
+	if err != nil {
+		return ErrInvalidDeviceCert
+	}
+	if !ok {
+		return ErrInvalidDeviceCert
 	}
 	return nil
 }
 
-// Marshal encodes the DC to stable wire bytes.
-// Format: uint16 version | uint32 device_id | uint16 ed25519_pub_len | <ed25519> |
-//
-//	uint16 x25519_pub_len | <x25519> | uint16 mldsa_pub_len | <mldsa> |
-//	int64 created_at | uint8 flags | uint16 sig_len | <sig> |
-//	uint16 mldsa_sig_len | <mldsa_sig>
 func (dc *DeviceCertificate) Marshal() []byte {
 	size := 2 + 4 +
 		2 + len(dc.DIKPubEd25519) +
@@ -182,6 +197,9 @@ func UnmarshalDeviceCert(b []byte) (*DeviceCertificate, error) {
 	dc.MLDSASignature, err = readField()
 	if err != nil {
 		return nil, err
+	}
+	if len(dc.DIKPubMLDSA) == 0 || len(dc.MLDSASignature) == 0 {
+		return nil, ErrDCMissingMLDSASignature
 	}
 	return dc, nil
 }

@@ -4,6 +4,8 @@ package x3dhpqcrypto
 import (
 	"bytes"
 	"testing"
+
+	"github.com/danielinux/xmppqr/internal/wolfcrypt"
 )
 
 func TestGenerateAccountIdentity(t *testing.T) {
@@ -45,5 +47,18 @@ func TestAccountFingerprintDifferent(t *testing.T) {
 	}
 	if aik1.Public().Fingerprint() == aik2.Public().Fingerprint() {
 		t.Fatal("distinct AIKs produced identical fingerprints")
+	}
+}
+
+func TestAccountHasMLDSAPopulated(t *testing.T) {
+	aik, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aik.PubMLDSA) != wolfcrypt.MLDSA65PubSize {
+		t.Fatalf("expected PubMLDSA length %d, got %d", wolfcrypt.MLDSA65PubSize, len(aik.PubMLDSA))
+	}
+	if len(aik.PrivMLDSA) == 0 {
+		t.Fatal("expected non-empty PrivMLDSA")
 	}
 }

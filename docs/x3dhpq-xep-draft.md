@@ -21,7 +21,7 @@
 
 ## 1. Abstract
 
-This document specifies x3dhpq-over-XMPP, a protocol for end-to-end encrypted (E2EE) messaging on XMPP networks. The protocol provides post-quantum confidentiality through a hybrid construction — every pairwise session combines classical X25519 Diffie-Hellman with ML-KEM-768 (FIPS 203) key encapsulation to derive a shared root key, which is subsequently protected by a Triple Ratchet (Signal Double Ratchet augmented with periodic ML-KEM-768 checkpoints). Account-level identity is anchored in an **Account Identity Key (AIK)**. In v1, the AIK is a long-term Ed25519 key; the design reserves ML-DSA-65 fields for hybrid signing once a wolfCrypt build with ML-DSA support is available. Each device holds a **Device Identity Key (DIK)** bound to the AIK by a **Device Certificate (DC)**, enabling users to verify each other once by AIK fingerprint while new devices enrol automatically via a CPace PAKE pairing protocol. An append-only **audit chain** records all device additions, removals, AIK rotations, and recovery events. Group sessions use per-device sender chains (Megolm-style) with epoch rotation on membership change. AIK backup and recovery use scrypt-derived AES-256-GCM sealed blobs optionally encoded as human-readable paper keys. The XMPP server is explicitly transport-only: it never holds keys, never decrypts content, and never inspects message envelopes.
+This document specifies x3dhpq-over-XMPP, a protocol for end-to-end encrypted (E2EE) messaging on XMPP networks. The protocol provides post-quantum confidentiality through a hybrid construction — every pairwise session combines classical X25519 Diffie-Hellman with ML-KEM-768 (FIPS 203) key encapsulation to derive a shared root key, which is subsequently protected by a Triple Ratchet (Signal Double Ratchet augmented with periodic ML-KEM-768 checkpoints). Account-level identity is anchored in an **Account Identity Key (AIK)** — a hybrid signing pair combining Ed25519 (FIPS 186) with ML-DSA-65 (FIPS 204). Both signatures are produced over every signed object (DC, DeviceList, AuditEntry, RotationPointer); both MUST verify for an object to be trusted. Each device holds a **Device Identity Key (DIK)** bound to the AIK by a **Device Certificate (DC)**, enabling users to verify each other once by AIK fingerprint while new devices enrol automatically via a CPace PAKE pairing protocol. An append-only **audit chain** records all device additions, removals, AIK rotations, and recovery events. Group sessions use per-device sender chains (Megolm-style) with epoch rotation on membership change. AIK backup and recovery use scrypt-derived AES-256-GCM sealed blobs optionally encoded as human-readable paper keys. The XMPP server is explicitly transport-only: it never holds keys, never decrypts content, and never inspects message envelopes.
 
 ---
 
@@ -50,7 +50,7 @@ x3dhpq-over-XMPP shares OMEMO's broad architecture: devices publish cryptographi
 
 1. **PQ hybrid key agreement**: X3DH is replaced by PQXDH, which incorporates an ML-KEM-768 encapsulation step. The root key is derived from both X25519 and KEM shared secrets (HKDF-SHA-512 throughout).
 2. **Triple Ratchet**: Signal's Double Ratchet is augmented with a Sparse PQ Ratchet (SPQR). Every K messages or after T seconds of inactivity, a fresh ML-KEM-768 encapsulation checkpoint injects entropy into the root key derivation.
-3. **Account identity**: Long-term identity is represented as an **AIK** — an Ed25519 keypair in v1, with ML-DSA-65 fields reserved (nil) until a wolfCrypt build with ML-DSA support is integrated (see §5 and §19.3). Bundles include a **Device Certificate** signed by the AIK instead of a bare DIK public key.
+3. **Account identity**: Long-term identity is represented as an **AIK** — a hybrid Ed25519 + ML-DSA-65 keypair providing post-quantum identity authentication. x3dhpq uses hybrid PQ identity authentication throughout: every signed object carries both an Ed25519 signature and an ML-DSA-65 signature; both MUST verify. Bundles include a **Device Certificate** signed by the AIK instead of a bare DIK public key.
 4. **Group sender keys**: Group sessions use per-device sender chains distributed pairwise, similar to Signal's group key design and Megolm.
 5. **Server role**: OMEMO servers are already transport-only in theory; this specification makes that property explicit and defines server-enforced policies.
 
@@ -76,7 +76,7 @@ This document uses RFC 2119 key words.
 - **REQ-3**: The protocol MUST provide post-compromise security: after a device compromise, security MUST be automatically restored within at most K messages or T seconds, without user action.
 - **REQ-4**: The server MUST NOT be able to decrypt any message or derive any session key.
 - **REQ-5**: Clients that do not support x3dhpq-over-XMPP MUST be able to coexist on the same server without disruption (unless the server is operating in x3dhpq-only mode, Section 15.6).
-- **REQ-6**: The protocol MUST be implementable using only NIST-standardized post-quantum primitives (FIPS 203; FIPS 204 reserved for future use).
+- **REQ-6**: The protocol MUST be implementable using only NIST-standardized post-quantum primitives (FIPS 203 for key encapsulation; FIPS 204 for hybrid digital signatures).
 - **REQ-7**: Protocol overhead (bundle size, per-message overhead) MUST be bounded and documented.
 - **REQ-8**: A user MUST be able to verify another user's identity with a single out-of-band comparison (AIK fingerprint or QR code). All of that user's devices MUST be transitively trusted after that single verification.
 - **REQ-9**: Adding a new device MUST NOT require any action from contacts; the new device MUST be automatically included in future messages to those contacts.
@@ -89,7 +89,7 @@ This document uses RFC 2119 key words.
 | Term | Definition |
 |------|------------|
 | **AEAD** | Authenticated Encryption with Associated Data |
-| **AIK** | Account Identity Key — long-term Ed25519 key in v1; ML-DSA-65 fields are reserved (nil) for future hybrid signing, one per account |
+| **AIK** | Account Identity Key — a hybrid Ed25519 + ML-DSA-65 long-term signing keypair, one per account. Both keys are always populated; both are required for all signing operations |
 | **AIK fingerprint** | BLAKE2b-160 of the canonical-encoded AIK public key, displayed as 30 hex chars in 6 groups of 5 |
 | **Audit chain** | Append-only PEP node recording AIK-signed events (add/remove device, rotate AIK, recover) |
 | **ChainKey (CK)** | Symmetric key used to advance the sending or receiving chain |
@@ -97,7 +97,8 @@ This document uses RFC 2119 key words.
 | **CRQC** | Cryptographically-Relevant Quantum Computer |
 | **DC (Device Certificate)** | AIK-signed binding of a DIK to an account, with device ID, creation time, and flags |
 | **DHR** | Diffie-Hellman Ratchet key pair (per-ratchet-step, classical X25519) |
-| **DIK** | Device Identity Key — per-device key (Ed25519 + X25519; ML-DSA-65 field reserved/nil in v1), never leaves the device |
+| **DIK** | Device Identity Key — per-device key (Ed25519 + X25519 + ML-DSA-65), never leaves the device |
+| **Hybrid signature** | A pair (Ed25519 signature, ML-DSA-65 signature) computed over the same SignedPart bytes. Both MUST verify; either failure rejects the signed object. Resists both classical (RSA-class) and post-quantum (Shor-class) signature forgery |
 | **scrypt** | Memory-hard password-based KDF (RFC 7914); used for AIK recovery blob key derivation with N=131072, r=8, p=1 |
 | **Double Ratchet** | Signal's Double Ratchet Algorithm combining a KDF chain with a DH ratchet |
 | **E2EE** | End-to-End Encryption |
@@ -108,7 +109,7 @@ This document uses RFC 2119 key words.
 | **KEM** | Key Encapsulation Mechanism |
 | **KEM checkpoint** | A Triple Ratchet step that injects a fresh ML-KEM-768 shared secret into the root key |
 | **MessageKey (MK)** | Ephemeral AEAD key derived from ChainKey for a single message |
-| **ML-DSA-65** | Module-Lattice Digital Signature Algorithm, FIPS 204, NIST security level 3 — reserved, not yet active |
+| **ML-DSA-65** | Module-Lattice Digital Signature Algorithm, FIPS 204, NIST security level 3 — active hybrid signature component (public key 1952 bytes, private key 5984 bytes, signature 3309 bytes) |
 | **ML-KEM-768** | Module-Lattice Key Encapsulation Mechanism, FIPS 203, NIST security level 3 |
 | **OMEMO** | XEP-0384, the existing XMPP E2EE protocol based on Signal's Double Ratchet |
 | **OPK** | One-Time Pre-Key (classical X25519) |
@@ -138,11 +139,11 @@ All cryptographic operations MUST use the following primitives. Implementations 
 | Primitive | Role | Reference |
 |-----------|------|-----------|
 | X25519 | Classical DH ratchet, SPK, OPK, CPace | RFC 7748 |
-| Ed25519 | AIK and DIK signature (current active component) | RFC 8032 |
+| Ed25519 | AIK and DIK hybrid signature — classical component (32-byte pub, 64-byte sig) | RFC 8032 |
 | ML-KEM-768 | KEM pre-keys, PQXDH handshake, Triple Ratchet checkpoints | FIPS 203 |
-| ML-DSA-65 | PQ signature component for AIK and DIK — **reserved, nil in v1** | FIPS 204 |
+| ML-DSA-65 | AIK and DIK hybrid signature — PQ component (1952-byte pub, 5984-byte priv, 3309-byte sig) — **ACTIVE** | FIPS 204 |
 
-**Note on ML-DSA-65**: The wire formats for AIK, DIK, and DC include ML-DSA-65 fields as length-prefixed byte strings. In the current implementation these fields are always nil/zero-length. The wolfSSL build configuration required for ML-DSA-65 support (Dilithium/wolfSSL build flags) has not been finalized. When a future implementation populates these fields, all verification routines MUST require both Ed25519 and ML-DSA-65 signatures to be valid. Parsers MUST tolerate nil ML-DSA-65 fields without error.
+**Hybrid signature requirement**: All signed objects (DC, DeviceList, AuditEntry, RotationPointer) carry both an Ed25519 signature and an ML-DSA-65 signature over the same canonical SignedPart bytes. Verification MUST require both signatures to pass. Any signed object that presents one signature but not the other MUST be rejected as a legacy artifact. See §7.7 for the complete wire-format specification.
 
 ### 5.2. Symmetric Primitives
 
@@ -314,21 +315,24 @@ The server additionally advertises `urn:xmppqr:x3dhpq:devicelist:0+notify` and `
 
 The AIK is the user's stable, account-scoped long-term identity. There is exactly one AIK per account (under normal operation). The AIK public key is what contacts pin when they verify the user's identity.
 
-Current wire representation (`AccountIdentityPub.Marshal()`):
+The AIK public key is hybrid: a 32-byte Ed25519 public key concatenated with a 1952-byte ML-DSA-65 public key, always fully populated. Wire representation (`AccountIdentityPub.Marshal()`):
 
 ```
-uint16 version (= 1)
-uint8  hasMLDSA (= 0 in v1; 1 when ML-DSA-65 is present)
-32 bytes  Ed25519 public key
-[variable ML-DSA-65 public key, present only if hasMLDSA = 1]
+uint16 version   (= 1)
+uint8  hasMLDSA  (= 1; objects with hasMLDSA = 0 are legacy artifacts and MUST be rejected)
+32 bytes   Ed25519 public key
+1952 bytes ML-DSA-65 public key
 ```
+
+Total marshal size: 1987 bytes.
 
 The AIK private key (`AccountIdentityKey`) holds:
 - `PrivEd25519` (64 bytes): Ed25519 private key (wolfCrypt seed+pub encoding).
 - `PubEd25519` (32 bytes): Ed25519 public key.
-- `PubMLDSA` (nil in v1): ML-DSA-65 public key, reserved.
+- `PrivMLDSA` (5984 bytes): ML-DSA-65 private key (raw 4032-byte key + embedded 1952-byte public key).
+- `PubMLDSA` (1952 bytes): ML-DSA-65 public key.
 
-v1 ships with Ed25519 signatures only. All AIK-signing operations use `wolfcrypt.Ed25519Sign(AIK.PrivEd25519, signedPart)`. The `PubMLDSA` field on `AccountIdentityKey` and `AccountIdentityPub` is always nil in v1. When ML-DSA-65 becomes available in a future version, hybrid signatures SHALL be computed as the concatenation `Ed25519Signature || ML-DSA-65Signature` with both required to verify, and old (Ed25519-only) certificates SHALL be rejected by clients that have negotiated v2 or later of the protocol.
+Both key components are always populated. All AIK-signing operations produce hybrid signatures using both `wolfcrypt.Ed25519Sign` and `wolfcrypt.MLDSA65Sign` over the same SignedPart bytes. See §7.7 for the full hybrid signature wire format.
 
 ### 7.2. Device Identity Key (DIK)
 
@@ -336,7 +340,7 @@ Each device generates a DIK locally on first run. The DIK MUST NOT leave the dev
 
 - `PubEd25519` (32 bytes): used for signing within the device.
 - `PubX25519` (32 bytes): used as the base key in X3DH / PQXDH.
-- `PubMLDSA` (nil in v1): reserved.
+- `PubMLDSA` (1952 bytes): ML-DSA-65 public key for hybrid device signatures.
 - Corresponding private keys, stored encrypted at rest.
 
 ### 7.3. Device Certificate (DC)
@@ -346,13 +350,13 @@ A DC is produced by the primary device (holding AIK_priv) and binds a DIK to the
 ```
 uint16  version (= 1)
 uint32  device_id
-uint16  ed25519_pub_len | <DIKPubEd25519>
-uint16  x25519_pub_len  | <DIKPubX25519>
-uint16  mldsa_pub_len   | <DIKPubMLDSA>    (len=0 in v1)
+uint16  ed25519_pub_len | <DIKPubEd25519>       (32 bytes)
+uint16  x25519_pub_len  | <DIKPubX25519>        (32 bytes)
+uint16  mldsa_pub_len   | <DIKPubMLDSA>         (1952 bytes when present)
 int64   created_at      (unix seconds)
 uint8   flags           (bit 0 = primary)
-uint16  sig_len         | <Ed25519 signature by AIK over SignedPart>
-uint16  mldsa_sig_len   | <ML-DSA-65 signature> (len=0 in v1)
+uint16  sig_len         | <Ed25519 signature by AIK over SignedPart>    (64 bytes)
+uint16  mldsa_sig_len   | <ML-DSA-65 signature by AIK over SignedPart>  (3309 bytes)
 ```
 
 `SignedPart` is the canonical byte sequence:
@@ -367,7 +371,7 @@ int64   created_at
 uint8   flags
 ```
 
-Verification (`dc.Verify(aikPub)`) checks the Ed25519 signature using `aikPub.PubEd25519`. A DC with an invalid Ed25519 signature MUST be rejected. In v1, the `MLDSASignature` field is always nil (the wolfCrypt build required for ML-DSA-65 has not been finalized); parsers MUST tolerate nil ML-DSA-65 fields without error. When ML-DSA-65 becomes available, the `MLDSASignature` field SHALL carry the 3309-byte ML-DSA-65 signature, and verification MUST require both signatures to pass.
+Verification (`dc.Verify(aikPub)`) requires BOTH the Ed25519 signature (using `aikPub.PubEd25519`) AND the ML-DSA-65 signature (using `aikPub.PubMLDSA`) to be valid over the same SignedPart bytes. A DC missing either signature, or presenting an invalid signature for either primitive, MUST be rejected. See §7.7 for the hybrid signature wire format.
 
 ### 7.4. AIK Fingerprint and Verification
 
@@ -402,6 +406,45 @@ A receiver's trust toward a peer AIK is one of three states:
 - **Rotated** — a Pinned AIK signed a rotation pointer to a new AIK. The new AIK is treated under Rotated state until the user re-verifies OOB. See §12 for full handling.
 
 Trust state is per-(receiver, peer-AIK). Storage of trust state is a client concern; this XEP defines the data model but not the persistence schema.
+
+### 7.7. Hybrid Signature Format
+
+Every signed object in x3dhpq (Device Certificate, DeviceList, AuditEntry,
+RotationPointer) carries TWO signatures over the same canonical
+SignedPart bytes:
+
+```
+Signature       — Ed25519 (RFC 8032), 64 bytes
+MLDSASignature  — ML-DSA-65 (FIPS 204), 3309 bytes
+```
+
+The signing AIK contributes both `PrivEd25519` and `PrivMLDSA`; the
+verifying AIK contributes both `PubEd25519` (32 bytes) and `PubMLDSA`
+(1952 bytes). VERIFY succeeds only when BOTH primitives accept the
+signature over the SignedPart. EITHER primitive rejecting the
+signature, OR EITHER signature being absent, MUST fail verification.
+
+The wire format always carries the hybrid pair:
+
+```
+... canonical SignedPart bytes ...
+|| uint16-be(64)   || ed25519_signature_64
+|| uint16-be(3309) || mldsa65_signature_3309
+```
+
+Implementations MUST reject any wire-format object that presents one
+signature but not the other — these are legacy Ed25519-only artifacts
+from earlier protocol drafts and SHALL NOT be trusted.
+
+Hybrid construction follows the well-known "must-verify-both" PQ
+transition pattern: an attacker who breaks Ed25519 (e.g., via Shor's
+algorithm on a quantum computer) but not ML-DSA-65 still cannot forge a
+signature; symmetrically, an attacker who finds a flaw in ML-DSA-65
+implementations or the underlying lattice problem still must defeat
+Ed25519. The cost is wire-format size: each signed object grows by
+~3373 bytes over a classical-only equivalent. For x3dhpq's typical
+artifact sizes (DC ~5 KB, DeviceList items ~32 KB, audit entries
+~3.5 KB), this is acceptable.
 
 ---
 
@@ -439,8 +482,12 @@ uint16  num_devices
   uint32  cert_len
   <cert_len bytes: DeviceCertificate.Marshal()>
 uint16  sig_len
-<sig_len bytes: Ed25519 signature by AIK over SignedPart>
+<sig_len bytes: Ed25519 signature by AIK over SignedPart>     (64 bytes)
+uint16  mldsa_sig_len
+<mldsa_sig_len bytes: ML-DSA-65 signature by AIK over SignedPart>  (3309 bytes)
 ```
+
+Both signatures MUST be present and valid; see §7.7. A DeviceList missing the ML-DSA-65 signature MUST be rejected.
 
 ### 8.4. Informative XML Example
 
@@ -816,12 +863,13 @@ The server SHOULD enforce a per-account item cap (suggested default: 1 MiB total
 
 ```go
 type AuditEntry struct {
-    Seq       uint64       // 0-based, contiguous
-    PrevHash  [32]byte     // SHA-256 of previous entry's Marshal(); zero for seq=0
-    Action    AuditAction  // 1=add-device, 2=remove-device, 3=rotate-aik, 4=recover-from-backup
-    Payload   []byte       // action-specific; see §11.4
-    Timestamp int64        // unix seconds; MUST NOT be less than previous entry's timestamp
-    Signature []byte       // Ed25519 signature by AIK over SignedPart
+    Seq           uint64       // 0-based, contiguous
+    PrevHash      [32]byte     // SHA-256 of previous entry's Marshal(); zero for seq=0
+    Action        AuditAction  // 1=add-device, 2=remove-device, 3=rotate-aik, 4=recover-from-backup
+    Payload       []byte       // action-specific; see §11.4
+    Timestamp     int64        // unix seconds; MUST NOT be less than previous entry's timestamp
+    Signature     []byte       // Ed25519 signature by AIK over SignedPart (64 bytes)
+    MLDSASignature []byte      // ML-DSA-65 signature by AIK over SignedPart (3309 bytes)
 }
 ```
 
@@ -838,7 +886,7 @@ uint32  payload_len | <payload>
 int64   timestamp
 ```
 
-`AuditEntry.Hash()` is `SHA-256(entry.Marshal())`, where `Marshal()` appends `uint16(sig_len) | <signature>` to `SignedPart()`.
+`AuditEntry.Hash()` is `SHA-256(entry.Marshal())`, where `Marshal()` appends `uint16(sig_len) | <Ed25519 signature> | uint16(mldsa_sig_len) | <ML-DSA-65 signature>` to `SignedPart()`. Both signatures MUST be present and valid (see §7.7).
 
 ### 11.4. Action Types and Payloads
 
@@ -855,6 +903,8 @@ int64   timestamp
 
 1. For each entry at position `i`:
    - Verify `Ed25519Verify(aikPub.PubEd25519, entry.SignedPart(), entry.Signature)`.
+   - Verify `MLDSA65Verify(aikPub.PubMLDSA, entry.SignedPart(), entry.MLDSASignature)`.
+   - Both signature checks MUST pass; either failure rejects the chain.
    - Assert `entry.Seq == uint64(i)`.
    - If `i == 0`: assert `entry.PrevHash == [32]byte{}` (genesis entry).
    - If `i > 0`: assert `entry.PrevHash == entries[i-1].Hash()`.
@@ -891,8 +941,11 @@ SignedPart = "X3DHPQ-Rotation-v1\x00"
              | uint16(new_aik_len) | <NewAIKPub.Marshal()>
              | int64(rotated_at)
              | uint16(reason_len) | <reason UTF-8> (max 512 bytes)
-Signature = Ed25519Sign(oldAIK.PrivEd25519, SignedPart)
+Signature      = Ed25519Sign(oldAIK.PrivEd25519, SignedPart)     // 64 bytes
+MLDSASignature = MLDSA65Sign(oldAIK.PrivMLDSA,  SignedPart)     // 3309 bytes
 ```
+
+Both signatures are computed by the old AIK over the same SignedPart and MUST both verify for the rotation pointer to be accepted (§7.7).
 
 3. Append a `RotateAIK` entry to the audit chain (signed by the old AIK).
 4. Re-issue DCs for all current devices under the new AIK (`ReissueDeviceCerts`).
@@ -902,7 +955,7 @@ Signature = Ed25519Sign(oldAIK.PrivEd25519, SignedPart)
 
 ### 12.2. Re-issuing Device Certificates
 
-`newAIK.ReissueDeviceCerts(devices []DeviceReissueInput)` produces fresh DCs for each device, signed by the new AIK. Each DC has a new `created_at` timestamp. The device's `DIKPubX25519`, `DIKPubEd25519`, and `DIKPubMLDSA` are unchanged.
+`newAIK.ReissueDeviceCerts(devices []DeviceReissueInput)` produces fresh DCs for each device, signed by the new AIK. Each DC has a new `created_at` timestamp. The device's `DIKPubX25519`, `DIKPubEd25519`, and `DIKPubMLDSA` are unchanged. Reissued DCs carry hybrid signatures (both Ed25519 and ML-DSA-65 from the new AIK) automatically — this requires no special handling; the standard `Sign` path always produces hybrid signatures.
 
 ### 12.3. Trust Policy on Rotation Detection
 
@@ -1455,6 +1508,8 @@ Group sessions (Megolm-style sender chains) provide weaker guarantees than 1:1 s
 - **No anonymity**: every member sees every other member's AIK fingerprint and device IDs.
 - A member who retains history can decrypt all messages sent before their removal, even after they leave the group.
 
+**Group-membership authentication and PQ elevation**: sender-chain announcements travel inside pairwise x3dhpq sessions. Those pairwise sessions carry hybrid Ed25519 + ML-DSA-65 authentication on all DCs and DeviceLists. Group-membership authentication is therefore transitively elevated to post-quantum security via the pairwise channel: an attacker cannot inject a forged membership announcement without forging both an Ed25519 and an ML-DSA-65 signature over the relevant DC or DeviceList.
+
 ### 18.4. Hybrid PQ Security Argument
 
 The root key derivation at session establishment:
@@ -1556,6 +1611,8 @@ xmppqr uses wolfSSL/wolfCrypt as its sole cryptographic backend. wolfCrypt provi
 | X25519 scalar mult (CPace) | `wolfcrypt.X25519ScalarMult`, `wolfcrypt.X25519DerivePublic` |
 | Ed25519 sign/verify | `wolfcrypt.Ed25519Sign`, `wolfcrypt.Ed25519Verify` |
 | ML-KEM-768 encaps/decaps | `wolfcrypt.MLKEM768Encapsulate`, `wolfcrypt.MLKEM768Decapsulate` |
+| ML-DSA-65 key gen | `wolfcrypt.GenerateMLDSA65` |
+| ML-DSA-65 sign/verify | `wolfcrypt.MLDSA65Sign`, `wolfcrypt.MLDSA65Verify` |
 | HKDF-SHA-512 | `wolfcrypt.HKDFExtract`, `wolfcrypt.HKDFExpand` |
 | HMAC-SHA-256 | `wolfcrypt.HMACSHA256` |
 | AES-256-GCM | `wolfcrypt.NewAESGCM`, `.Seal`, `.Open` |
@@ -1569,13 +1626,13 @@ Clients not using wolfCrypt MUST ensure their chosen library implements FIPS 203
 
 ### 19.5. ML-DSA-65 Status
 
-ML-DSA-65 (FIPS 204) is **not active** in the current implementation. All ML-DSA-65 fields in AIK, DIK, DC, and devicelist wire formats are zero-length. The wolfSSL build flag dependency (`WOLFSSL_DILITHIUM` or equivalent) has not been finalized. When activated in a future version:
+ML-DSA-65 (FIPS 204) is **active** as of Wave 20. The wolfCrypt/wolfSSL Dilithium backend (`internal/wolfcrypt/mldsa.go`) is fully integrated and in use for all signing operations. Key sizes:
 
-- `AccountIdentityPub.PubMLDSA` will carry the 1952-byte ML-DSA-65 public key.
-- `DeviceCertificate.MLDSASignature` will carry the 3309-byte ML-DSA-65 signature.
-- All verification routines MUST require both Ed25519 and ML-DSA-65 signatures to pass.
-- The `hasMLDSA = 1` flag in the AIK marshal encoding signals the presence of ML-DSA-65 material.
-- Wire formats are forward-compatible: v1 parsers MUST tolerate nil ML-DSA-65 fields without error.
+- Public key: 1952 bytes (`MLDSA65PubSize`).
+- Private key: 5984 bytes (`MLDSA65PrivSize` = 4032-byte raw + 1952-byte embedded pub).
+- Signature: 3309 bytes (`MLDSA65SigSize`).
+
+`AccountIdentityPub.PubMLDSA` always carries the 1952-byte ML-DSA-65 public key (`hasMLDSA = 1` always). All DC, DeviceList, AuditEntry, and RotationPointer objects carry the 3309-byte ML-DSA-65 signature alongside the 64-byte Ed25519 signature. Verification requires both to pass (§7.7). Wire objects with missing ML-DSA-65 signatures are v1 legacy artifacts and are rejected by v2 verifiers.
 
 ### 19.6. Cryptographic Review Status
 
@@ -1584,7 +1641,7 @@ The construction adapts Signal's SparsePostQuantumRatchet and PQXDH but diverges
 - Triple Ratchet KEM mixing is split between immediate chain-key re-derivation and a deferred `KEMHistory` accumulator injected at the next DH ratchet step. This deviates from naive "kem_ss into RK" designs and is necessary because of the Double Ratchet's asymmetric RK update pattern.
 - CPace pairing uses RFC 9380 §6.7 Elligator2 hash-to-curve over X25519 with a richer transcript binding than the upstream draft suggests.
 - Group sender keys are Megolm-style without KEM checkpoints in v1.
-- All crypto goes through wolfCrypt; ML-DSA-65 is reserved but not yet active.
+- v2 of x3dhpq activates hybrid Ed25519 + ML-DSA-65 signing throughout (Wave 20). v1 Ed25519-only artifacts are deprecated and rejected by v2 verifiers.
 
 The protocol therefore does **NOT** inherit Signal's published security proofs by reference. Independent cryptographic review is required before production deployment. This XEP draft is Experimental.
 
@@ -1679,18 +1736,21 @@ displayed as 30 hex chars in 6 groups of 5.
 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
 ```
 
-`PubMLDSA` = nil (v1).
+`PubMLDSA` = `0xa5` × 1952 bytes (fixed test pattern; NOT a real ML-DSA-65 key — used only to exercise the fingerprint hash path).
 
-**`AccountIdentityPub.Marshal()` encoding** (35 bytes):
+**`AccountIdentityPub.Marshal()` encoding** (1987 bytes):
 ```
 uint16(1)  = 0001
-uint8(0)   = 00        (hasMLDSA = 0)
+uint8(1)   = 01        (hasMLDSA = 1)
 <32 bytes Ed25519 pub>
+<1952 bytes ML-DSA-65 pub (all 0xa5)>
 ```
+
+Note: the previous v1 fingerprint `CEC21 253B5 4FF48 ECFAB 9D737 EE8EB` was computed over a 35-byte marshal with `hasMLDSA = 0` and no ML-DSA-65 material. That vector is obsolete as of Wave 20.
 
 **Output fingerprint**:
 ```
-CEC21 253B5 4FF48 ECFAB 9D737 EE8EB
+7AD37 1A1A3 67A62 B6533 1BC5A 2204C
 ```
 
 ### A.2. DeviceCertificate SignedPart
@@ -1793,6 +1853,21 @@ fdb1f3d1eb083c9049170245004401f1649eae82d7d14620bdd64d717c39dce2
 ```
 3cd70ff3b328c19fb5cb767d31e3e11e8c01e2860393fadd5bb7d3e689c1e10e
 ```
+
+### A.6. ML-DSA-65 Sign/Verify
+
+A deterministic test vector for ML-DSA-65 sign/verify with a fixed seed is
+**not provided** in this version. The wolfCrypt ML-DSA-65 API
+(`wc_dilithium_make_key`, `wc_dilithium_sign_ctx_msg`) uses the CSPRNG for
+key generation and signing per FIPS 204 (ML-DSA uses randomized signing by
+default). wolfCrypt does not expose a deterministic signing interface that
+accepts an explicit per-sign random value (the `rnd` context parameter is not
+available in the current binding). A fixed-seed sign vector would therefore
+require a bespoke wolfCrypt build. This vector is deferred pending wolfCrypt
+API support for deterministic signing mode.
+
+Implementers wishing to verify ML-DSA-65 interoperability should use the NIST
+FIPS 204 Known Answer Tests (KATs) available from NIST's test-vector repository.
 
 ---
 

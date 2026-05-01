@@ -2,6 +2,7 @@
 package x3dhpqcrypto
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -220,5 +221,33 @@ func TestAuditMarshalRoundTrip(t *testing.T) {
 	}
 	if err := e2.Verify(aik.Public()); err != nil {
 		t.Fatalf("Verify after round-trip: %v", err)
+	}
+}
+
+func TestAuditEntryVerifyMissingMLDSARejected(t *testing.T) {
+	aik, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := aik.AppendAudit(nil, AuditActionAddDevice, []byte("payload"), 1000)
+	if err != nil {
+		t.Fatalf("AppendAudit: %v", err)
+	}
+	e.MLDSASignature = nil
+	if got := e.Verify(aik.Public()); !errors.Is(got, ErrAuditMissingMLDSASignature) {
+		t.Fatalf("expected ErrAuditMissingMLDSASignature, got %v", got)
+	}
+}
+
+func TestAuditChainCatchesMLDSATamper(t *testing.T) {
+	aik, err := GenerateAccountIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := makeAuditChain(t, aik, 3)
+	entries[1].MLDSASignature[0] ^= 0xFF
+	err = VerifyChain(entries, aik.Public())
+	if err == nil {
+		t.Fatal("expected error for tampered ML-DSA signature in chain")
 	}
 }
