@@ -13,7 +13,9 @@ const (
 	nsSM       = "urn:xmpp:sm:3"
 	nsCSI      = "urn:xmpp:csi:0"
 	nsSASL     = "urn:ietf:params:xml:ns:xmpp-sasl"
-	nsDowngrade = "urn:xmpp:sasl-channel-binding:0"
+	// XEP-0440 channel-binding type capability advertisement.
+	// The session is always TLS-wrapped so tls-exporter is unconditionally available.
+	nsSASLCB = "urn:xmpp:sasl-cb:0"
 	nsStream    = "http://etherx.jabber.org/streams"
 	nsStreamErr = "http://etherx.jabber.org/streams"
 )
@@ -43,6 +45,15 @@ func buildFeatures(s *Session, sasl bool, bind bool) []byte {
 			b.WriteString(fmt.Sprintf(`<mechanism>%s</mechanism>`, m))
 		}
 		b.WriteString(`</mechanisms>`)
+
+		// XEP-0440: announce which channel-binding types we accept so SCRAM-PLUS
+		// clients know what to feed into their auth proof. Without this, modern
+		// clients (Conversations) fall through to a "guess" path and the SCRAM
+		// proof's channel-binding bytes mismatch what the server computes,
+		// producing not-authorized.
+		b.WriteString(fmt.Sprintf(`<sasl-channel-binding xmlns='%s'>`, nsSASLCB))
+		b.WriteString(`<channel-binding type='tls-exporter'/>`)
+		b.WriteString(`</sasl-channel-binding>`)
 	}
 
 	if bind {
