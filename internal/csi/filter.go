@@ -26,7 +26,10 @@ type Filter struct {
 }
 
 func New() *Filter {
-	return &Filter{pendingPresence: make(map[string][]byte)}
+	return &Filter{
+		active:          true,
+		pendingPresence: make(map[string][]byte),
+	}
 }
 
 func (f *Filter) SetActive(active bool) [][]byte {

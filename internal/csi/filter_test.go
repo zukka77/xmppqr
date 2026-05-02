@@ -4,6 +4,13 @@ import (
 	"testing"
 )
 
+func TestDefaultIsActivePerXEP0352(t *testing.T) {
+	f := New()
+	if !f.IsActive() {
+		t.Fatal("XEP-0352: client without indication MUST be treated as active")
+	}
+}
+
 func TestActivePassesAll(t *testing.T) {
 	f := New()
 	f.SetActive(true)
@@ -24,6 +31,7 @@ func TestActivePassesAll(t *testing.T) {
 
 func TestInactiveCoalescesPresence(t *testing.T) {
 	f := New()
+	f.SetActive(false)
 
 	si := StanzaInfo{Kind: KindPresence, FromJID: "alice@example.com"}
 	deliver, hold := f.ShouldDeliver(si)
@@ -45,6 +53,7 @@ func TestInactiveCoalescesPresence(t *testing.T) {
 
 func TestInactiveDropsChatState(t *testing.T) {
 	f := New()
+	f.SetActive(false)
 
 	si := StanzaInfo{Kind: KindMessage, HasChatState: true, HasBody: false}
 	deliver, hold := f.ShouldDeliver(si)
@@ -55,6 +64,7 @@ func TestInactiveDropsChatState(t *testing.T) {
 
 func TestInactiveDeliversMessageWithBody(t *testing.T) {
 	f := New()
+	f.SetActive(false)
 
 	si := StanzaInfo{Kind: KindMessage, HasBody: true}
 	deliver, hold := f.ShouldDeliver(si)
@@ -65,6 +75,7 @@ func TestInactiveDeliversMessageWithBody(t *testing.T) {
 
 func TestTransitionFlushesPresence(t *testing.T) {
 	f := New()
+	f.SetActive(false)
 
 	f.HoldPresence("bob@example.com", []byte("<presence from='bob'/>"))
 	f.HoldPresence("carol@example.com", []byte("<presence from='carol'/>"))
