@@ -30,3 +30,14 @@ func TestBuildFeaturesNoCBAdvertisementWhenSaslDisabled(t *testing.T) {
 		t.Errorf("CB advertisement should only appear with sasl=true; got: %s", out)
 	}
 }
+
+// RFC 9266 §4.2 mandates the exact label "EXPORTER-Channel-Binding" for
+// tls-exporter channel binding. Any deviation makes server- and client-derived
+// 32-byte CB material differ, so SCRAM-PLUS auth fails not-authorized. Lock
+// the constant so a future "tidy this up" rename can't silently break interop.
+func TestTlsExporterChannelBindingLabel(t *testing.T) {
+	if tlsExporterChannelBindingLabel != "EXPORTER-Channel-Binding" {
+		t.Errorf("RFC 9266 label mismatch: got %q, want %q",
+			tlsExporterChannelBindingLabel, "EXPORTER-Channel-Binding")
+	}
+}

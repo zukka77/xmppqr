@@ -31,9 +31,15 @@ type tlsExporterCB struct {
 	cbType  string
 }
 
+// RFC 9266 §4.2: the tls-exporter channel binding for TLS 1.3 derives 32 bytes
+// from the TLS exporter using label "EXPORTER-Channel-Binding" with an empty
+// context. Both endpoints must use this exact label or their SCRAM-PLUS
+// proofs will diverge and the server will reply not-authorized.
+const tlsExporterChannelBindingLabel = "EXPORTER-Channel-Binding"
+
 func (cb *tlsExporterCB) Type() string { return cb.cbType }
 func (cb *tlsExporterCB) Data() []byte {
-	data, err := cb.conn.Exporter("exporter", nil, 32)
+	data, err := cb.conn.Exporter(tlsExporterChannelBindingLabel, nil, 32)
 	if err != nil {
 		return nil
 	}
