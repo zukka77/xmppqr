@@ -325,7 +325,10 @@ func handleOutboundMessage(ctx context.Context, s *Session, start xml.StartEleme
 		}
 		if msgType == stanza.MessageGroupchat || msgType == "" || j.Domain == mods.MUC.Domain() {
 			from := s.jid
-			_ = mods.MUC.HandleStanza(ctx, raw, "message", from, j)
+			if err := mods.MUC.HandleStanza(ctx, raw, "message", from, j); err != nil {
+				s.log.Warn("muc message failed", "from", from.String(), "to", j.String(), "err", err)
+				writeStanzaErrorResponse(s, start.Name.Local, raw, s.jid.String(), j.String(), err)
+			}
 			atomic.AddUint32(&s.smInH, 1)
 			return nil
 		}
@@ -388,7 +391,10 @@ func handlePresence(ctx context.Context, s *Session, start xml.StartElement, raw
 
 	if mods != nil && mods.MUC != nil && mods.MUC.IsOurDomain(j) {
 		from := s.jid
-		_ = mods.MUC.HandleStanza(ctx, raw, "presence", from, j)
+		if err := mods.MUC.HandleStanza(ctx, raw, "presence", from, j); err != nil {
+			s.log.Warn("muc presence failed", "from", from.String(), "to", j.String(), "err", err)
+			writeStanzaErrorResponse(s, start.Name.Local, raw, s.jid.String(), j.String(), err)
+		}
 		atomic.AddUint32(&s.smInH, 1)
 		return nil
 	}
@@ -582,6 +588,32 @@ func writeIQResponse(s *Session, iq *stanza.IQ, respBytes []byte, err error) {
 	if respBytes != nil {
 		_, _ = s.enc.WriteRaw(respBytes)
 	}
+}
+
+func writeStanzaErrorResponse(s *Session, stanzaLocal string, original []byte, from, to string, err error) {
+	se, ok := err.(*stanza.StanzaError)
+	if !ok {
+		se = &stanza.StanzaError{Type: stanza.ErrorTypeCancel, Condition: stanza.ErrInternalServerError}
+	}
+	errBytes, merr := se.Marshal()
+	if merr != nil {
+		s.log.Warn("marshal stanza error failed", "stanza", stanzaLocal, "err", merr)
+		return
+	}
+	var idAttr string
+	if id := extractAttr(original, "id"); id != "" {
+		idAttr = fmt.Sprintf(` id='%s'`, xmlEscape(id))
+	}
+	resp := fmt.Sprintf(
+		`<%s from='%s' to='%s'%s type='error'>%s</%s>`,
+		stanzaLocal,
+		xmlEscape(from),
+		xmlEscape(to),
+		idAttr,
+		errBytes,
+		stanzaLocal,
+	)
+	_, _ = s.enc.WriteRaw([]byte(resp))
 }
 
 func dispatchLocalIQ(ctx context.Context, s *Session, iq *stanza.IQ) ([]byte, error) {

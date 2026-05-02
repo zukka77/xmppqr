@@ -3,6 +3,7 @@ package c2s
 import (
 	"context"
 	"encoding/base64"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/disco"
 	"github.com/danielinux/xmppqr/internal/ibr"
 	"github.com/danielinux/xmppqr/internal/mam"
+	"github.com/danielinux/xmppqr/internal/muc"
 	"github.com/danielinux/xmppqr/internal/pep"
 	"github.com/danielinux/xmppqr/internal/presence"
 	"github.com/danielinux/xmppqr/internal/pubsub"
@@ -1316,4 +1318,67 @@ func TestIBREnabledAndDisabled(t *testing.T) {
 			t.Errorf("should not advertise iq-register when disabled; got: %s", features)
 		}
 	})
+}
+
+func TestMUCJoinConflictReturnsPresenceError(t *testing.T) {
+	ctx := context.Background()
+	stores := memstore.New()
+	r := router.New()
+	mucSvc := muc.New("example.com", "conference", stores.MUC, r, slog.Default())
+	aliceJID, err := stanza.Parse("alice@example.com/phone")
+	if err != nil {
+		t.Fatalf("parse alice jid: %v", err)
+	}
+	roomJID, err := stanza.Parse("room@conference.example.com/Alice")
+	if err != nil {
+		t.Fatalf("parse room jid: %v", err)
+	}
+	bobJID, err := stanza.Parse("bob@example.com/laptop")
+	if err != nil {
+		t.Fatalf("parse bob jid: %v", err)
+	}
+
+	occupantSession := &routerMockSession{
+		j:         aliceJID,
+		available: true,
+		ch:        make(chan []byte, 8),
+	}
+	r.Register(occupantSession)
+
+	joinRaw := []byte(`<presence to='room@conference.example.com/Alice' xmlns='jabber:client'><x xmlns='http://jabber.org/protocol/muc'/></presence>`)
+	if err := mucSvc.HandleStanza(ctx, joinRaw, "presence", occupantSession.j, roomJID); err != nil {
+		t.Fatalf("seed join: %v", err)
+	}
+
+	client, server := testPipe(t)
+	cfg := makeTestConfig(stores, r, sm.NewStore(64))
+	cfg.Modules = &Modules{MUC: mucSvc}
+	s := NewSession(&mockTLSConn{server}, cfg)
+	s.jid = bobJID
+
+	dec := xml.NewDecoder(strings.NewReader(string(joinRaw)))
+	tok, err := dec.Token()
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	start, ok := tok.(xml.StartElement)
+	if !ok {
+		t.Fatal("expected start element")
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- handlePresence(ctx, s, start, joinRaw, roomJID)
+	}()
+
+	raw := readUntil(t, client, "</presence>", 3*time.Second)
+	if err := <-errCh; err != nil {
+		t.Fatalf("handlePresence returned error: %v", err)
+	}
+	if !strings.Contains(raw, `type='error'`) && !strings.Contains(raw, `type="error"`) {
+		t.Fatalf("expected presence error stanza, got: %s", raw)
+	}
+	if !strings.Contains(raw, "conflict") {
+		t.Fatalf("expected conflict condition, got: %s", raw)
+	}
 }
