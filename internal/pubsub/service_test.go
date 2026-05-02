@@ -114,6 +114,35 @@ func buildItemsIQ(node string) *stanza.IQ {
 	}
 }
 
+func buildItemsByIDIQ(node, itemID string) *stanza.IQ {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	psEl := xml.StartElement{Name: xml.Name{Space: nsPubSub, Local: "pubsub"}}
+	itemsEl := xml.StartElement{
+		Name: xml.Name{Local: "items"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "node"}, Value: node}},
+	}
+	itemEl := xml.StartElement{
+		Name: xml.Name{Local: "item"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "id"}, Value: itemID}},
+	}
+	enc.EncodeToken(psEl)
+	enc.EncodeToken(itemsEl)
+	enc.EncodeToken(itemEl)
+	enc.EncodeToken(itemEl.End())
+	enc.EncodeToken(itemsEl.End())
+	enc.EncodeToken(psEl.End())
+	enc.Flush()
+
+	return &stanza.IQ{
+		ID:      "items-by-id",
+		From:    "alice@example.com/res",
+		To:      "alice@example.com",
+		Type:    stanza.IQGet,
+		Payload: buf.Bytes(),
+	}
+}
+
 func buildRetractIQ(node, itemID string) *stanza.IQ {
 	var buf bytes.Buffer
 	enc := xml.NewEncoder(&buf)
@@ -173,6 +202,38 @@ func TestPublishItemsRoundtrip(t *testing.T) {
 		if !bytes.Contains(raw, []byte(id)) {
 			t.Errorf("items response missing %s: %s", id, raw)
 		}
+	}
+	if !bytes.Contains(raw, []byte(`<items xmlns="http://jabber.org/protocol/pubsub"`)) {
+		t.Fatalf("items response missing pubsub namespace on <items>: %s", raw)
+	}
+	if !bytes.Contains(raw, []byte(`<item xmlns="http://jabber.org/protocol/pubsub"`)) {
+		t.Fatalf("items response missing pubsub namespace on <item>: %s", raw)
+	}
+}
+
+func TestItemsFetchByIDReturnsOnlyRequestedItem(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	owner, _ := stanza.Parse("alice@example.com/res")
+	node := "urn:test:node"
+
+	pubIQ := buildPublishIQ(node, []rawItem{
+		{ID: "item1", Payload: []byte("<val>1</val>")},
+		{ID: "item2", Payload: []byte("<val>2</val>")},
+	})
+	if _, err := svc.HandleIQ(ctx, owner, pubIQ); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	raw, err := svc.HandleIQ(ctx, owner, buildItemsByIDIQ(node, "item2"))
+	if err != nil {
+		t.Fatalf("items by id: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`id="item2"`)) {
+		t.Fatalf("expected requested item in response, got: %s", raw)
+	}
+	if bytes.Contains(raw, []byte(`id="item1"`)) {
+		t.Fatalf("unexpected extra item in response: %s", raw)
 	}
 }
 
@@ -413,5 +474,10 @@ func TestNotifyDispatched(t *testing.T) {
 	if !bytes.Contains(deliveries[0], []byte("n1")) {
 		t.Errorf("notify missing item id: %s", deliveries[0])
 	}
+	if !bytes.Contains(deliveries[0], []byte(`<items xmlns="http://jabber.org/protocol/pubsub#event"`)) {
+		t.Errorf("notify missing event namespace on <items>: %s", deliveries[0])
+	}
+	if !bytes.Contains(deliveries[0], []byte(`<item xmlns="http://jabber.org/protocol/pubsub#event"`)) {
+		t.Errorf("notify missing event namespace on <item>: %s", deliveries[0])
+	}
 }
-

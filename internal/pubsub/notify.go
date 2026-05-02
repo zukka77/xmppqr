@@ -16,11 +16,11 @@ func (svc *Service) notify(ctx context.Context, owner stanza.JID, node, itemID s
 
 	eventEl := xml.StartElement{Name: xml.Name{Space: nsPubSubEvent, Local: "event"}}
 	itemsEl := xml.StartElement{
-		Name: xml.Name{Local: "items"},
+		Name: xml.Name{Space: nsPubSubEvent, Local: "items"},
 		Attr: []xml.Attr{{Name: xml.Name{Local: "node"}, Value: node}},
 	}
 	itemEl := xml.StartElement{
-		Name: xml.Name{Local: "item"},
+		Name: xml.Name{Space: nsPubSubEvent, Local: "item"},
 		Attr: []xml.Attr{{Name: xml.Name{Local: "id"}, Value: itemID}},
 	}
 

@@ -60,6 +60,9 @@ func parseRequest(payload []byte) (*pubsubRequest, error) {
 			req.op = "items"
 			req.node = attrVal(se, "node")
 			req.max = attrInt(se, "max_items")
+			if err := parseRequestedItems(dec, req); err != nil {
+				return nil, err
+			}
 		case "subscribe":
 			req.op = "subscribe"
 			req.node = attrVal(se, "node")
@@ -123,6 +126,31 @@ func parseRetractItems(dec *xml.Decoder, req *pubsubRequest) error {
 			}
 		case xml.EndElement:
 			if t.Name.Local == "retract" {
+				return nil
+			}
+		}
+	}
+}
+
+func parseRequestedItems(dec *xml.Decoder, req *pubsubRequest) error {
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "item" && req.itemID == "" {
+				req.itemID = attrVal(t, "id")
+			}
+			if err := dec.Skip(); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if t.Name.Local == "items" {
 				return nil
 			}
 		}

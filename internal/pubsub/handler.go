@@ -53,7 +53,7 @@ func (svc *Service) HandleIQ(ctx context.Context, owner stanza.JID, iq *stanza.I
 	case "retract":
 		return svc.handleRetract(ctx, owner, iq, req.node, req.itemID)
 	case "items":
-		return svc.handleItems(ctx, owner, iq, req.node, req.max)
+		return svc.handleItems(ctx, owner, iq, req.node, req.itemID, req.max)
 	case "subscribe":
 		return iqResult(iq, nil)
 	case "unsubscribe":
@@ -107,11 +107,24 @@ func (svc *Service) handleRetract(ctx context.Context, owner stanza.JID, iq *sta
 	return iqResult(iq, nil)
 }
 
-func (svc *Service) handleItems(ctx context.Context, owner stanza.JID, iq *stanza.IQ, node string, max int) ([]byte, error) {
+func (svc *Service) handleItems(ctx context.Context, owner stanza.JID, iq *stanza.IQ, node, itemID string, max int) ([]byte, error) {
 	if node == "" {
 		return iqError(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest)
 	}
-	items, err := svc.store.ListItems(ctx, owner.Bare().String(), node, max)
+
+	var (
+		items []*storage.PEPItem
+		err   error
+	)
+	if itemID != "" {
+		var it *storage.PEPItem
+		it, err = svc.store.GetItem(ctx, owner.Bare().String(), node, itemID)
+		if err == nil {
+			items = []*storage.PEPItem{it}
+		}
+	} else {
+		items, err = svc.store.ListItems(ctx, owner.Bare().String(), node, max)
+	}
 	if err != nil {
 		return iqError(iq, stanza.ErrorTypeWait, stanza.ErrInternalServerError)
 	}
@@ -122,7 +135,7 @@ func (svc *Service) handleItems(ctx context.Context, owner stanza.JID, iq *stanz
 		Name: xml.Name{Space: nsPubSub, Local: "pubsub"},
 	}
 	itemsEl := xml.StartElement{
-		Name: xml.Name{Local: "items"},
+		Name: xml.Name{Space: nsPubSub, Local: "items"},
 		Attr: []xml.Attr{{Name: xml.Name{Local: "node"}, Value: node}},
 	}
 	enc.EncodeToken(psEl)
@@ -130,7 +143,7 @@ func (svc *Service) handleItems(ctx context.Context, owner stanza.JID, iq *stanz
 
 	for _, it := range items {
 		itemEl := xml.StartElement{
-			Name: xml.Name{Local: "item"},
+			Name: xml.Name{Space: nsPubSub, Local: "item"},
 			Attr: []xml.Attr{{Name: xml.Name{Local: "id"}, Value: it.ItemID}},
 		}
 		enc.EncodeToken(itemEl)
@@ -184,4 +197,3 @@ func (svc *Service) EnsureNode(ctx context.Context, owner stanza.JID, node strin
 		AccessModel: 0,
 	})
 }
-
