@@ -176,6 +176,10 @@ func TestPGPEP(t *testing.T) {
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list items: %v", err)
 	}
+	list, err = s.ListItems(ctx, owner, "urn:xmpp:mood:0", 0)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list items zero limit: len=%d err=%v", len(list), err)
+	}
 	if err := s.DeleteItem(ctx, owner, "urn:xmpp:mood:0", "current"); err != nil {
 		t.Fatal(err)
 	}

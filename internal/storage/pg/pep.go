@@ -79,12 +79,25 @@ func (s *pgPEP) GetItem(ctx context.Context, owner, node, itemID string) (*stora
 }
 
 func (s *pgPEP) ListItems(ctx context.Context, owner, node string, limit int) ([]*storage.PEPItem, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT owner, node, item_id, publisher, published_at, payload
-		FROM pep_items WHERE owner=$1 AND node=$2
-		ORDER BY published_at ASC LIMIT $3`,
-		owner, node, limit,
+	var (
+		rows pgx.Rows
+		err  error
 	)
+	if limit > 0 {
+		rows, err = s.pool.Query(ctx, `
+			SELECT owner, node, item_id, publisher, published_at, payload
+			FROM pep_items WHERE owner=$1 AND node=$2
+			ORDER BY published_at ASC LIMIT $3`,
+			owner, node, limit,
+		)
+	} else {
+		rows, err = s.pool.Query(ctx, `
+			SELECT owner, node, item_id, publisher, published_at, payload
+			FROM pep_items WHERE owner=$1 AND node=$2
+			ORDER BY published_at ASC`,
+			owner, node,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
