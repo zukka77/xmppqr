@@ -78,6 +78,9 @@ func TestDeliverCarbons_ReceivedDirection(t *testing.T) {
 		if !strings.Contains(s, "received") {
 			t.Fatalf("expected <received> carbon, got: %s", s)
 		}
+		if !strings.Contains(s, `<message xmlns="jabber:client" from="bob@example.com" to="alice@example.com/phone">`) {
+			t.Fatalf("expected forwarded client-namespace message, got: %s", s)
+		}
 		if !strings.Contains(s, "alice@example.com/tablet") {
 			t.Fatalf("carbon should be addressed to tablet: %s", s)
 		}
@@ -119,6 +122,9 @@ func TestDeliverCarbons_SentDirection(t *testing.T) {
 		s := string(got)
 		if !strings.Contains(s, "sent") {
 			t.Fatalf("expected <sent> carbon, got: %s", s)
+		}
+		if !strings.Contains(s, `<message xmlns="jabber:client" from="alice@example.com/phone" to="bob@example.com">`) {
+			t.Fatalf("expected forwarded client-namespace message, got: %s", s)
 		}
 	default:
 		t.Fatal("sB did not receive sent carbon")

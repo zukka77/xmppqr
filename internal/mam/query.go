@@ -121,7 +121,7 @@ func buildResultMessage(to, from, queryID string, r *storage.ArchivedStanza) []b
 	enc.EncodeToken(delayStart.End())
 	enc.Flush()
 
-	buf.Write(r.StanzaXML)
+	buf.Write(stanza.EnsureClientNamespace(r.StanzaXML))
 
 	enc.EncodeToken(fwdStart.End())
 	enc.EncodeToken(resultStart.End())
@@ -174,4 +174,3 @@ func buildFin(results []*storage.ArchivedStanza, complete bool) []byte {
 
 	return buf.Bytes()
 }
-

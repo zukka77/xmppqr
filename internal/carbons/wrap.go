@@ -49,7 +49,7 @@ func wrapCarbon(to, direction string, original []byte) []byte {
 	enc.EncodeToken(fwdStart)
 	enc.Flush()
 
-	buf.Write(original)
+	buf.Write(stanza.EnsureClientNamespace(original))
 
 	enc.EncodeToken(fwdStart.End())
 	enc.EncodeToken(dirStart.End())
