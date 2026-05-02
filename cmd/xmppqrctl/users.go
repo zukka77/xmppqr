@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/danielinux/xmppqr/internal/accountjid"
 	"github.com/danielinux/xmppqr/internal/auth"
 	"github.com/danielinux/xmppqr/internal/config"
 	"github.com/danielinux/xmppqr/internal/storage"
@@ -40,6 +41,11 @@ func cmdUseradd(args []string) int {
 	if *domain == "" {
 		*domain = cfg.Server.Domain
 	}
+	accountJID, _, err := accountjid.Normalize(username, *domain)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "username:", err)
+		return 1
+	}
 
 	var passwd []byte
 	if *password != "" {
@@ -61,9 +67,9 @@ func cmdUseradd(args []string) int {
 	defer closeDB()
 
 	if !*replace {
-		existing, _ := stores.Users.Get(ctx, username)
+		existing, _ := stores.Users.Get(ctx, accountJID)
 		if existing != nil {
-			fmt.Fprintf(os.Stderr, "user %q already exists (use -replace to overwrite)\n", username)
+			fmt.Fprintf(os.Stderr, "user %q already exists (use -replace to overwrite)\n", accountJID)
 			return 1
 		}
 	}
@@ -92,7 +98,7 @@ func cmdUseradd(args []string) int {
 	}
 
 	u := &storage.User{
-		Username:     username,
+		Username:     accountJID,
 		ScramSalt:    salt,
 		ScramIter:    iter,
 		Argon2Params: argon2Hash,
@@ -106,7 +112,7 @@ func cmdUseradd(args []string) int {
 		fmt.Fprintln(os.Stderr, "put user:", err)
 		return 1
 	}
-	fmt.Printf("user '%s@%s' created\n", username, *domain)
+	fmt.Printf("user '%s' created\n", accountJID)
 	return 0
 }
 
@@ -161,6 +167,11 @@ func cmdUserdel(args []string) int {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		return 1
 	}
+	accountJID, _, err := accountjid.Normalize(username, cfg.Server.Domain)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "username:", err)
+		return 1
+	}
 
 	ctx := context.Background()
 	stores, closeDB, err := openStores(ctx, cfg)
@@ -170,11 +181,11 @@ func cmdUserdel(args []string) int {
 	}
 	defer closeDB()
 
-	if err := stores.Users.Delete(ctx, username); err != nil {
+	if err := stores.Users.Delete(ctx, accountJID); err != nil {
 		fmt.Fprintln(os.Stderr, "delete:", err)
 		return 1
 	}
-	fmt.Printf("user '%s' deleted\n", username)
+	fmt.Printf("user '%s' deleted\n", accountJID)
 	return 0
 }
 

@@ -63,8 +63,8 @@ ML-DSA support is also wired into the tree, but whether it works on your machine
 Build the daemon and admin CLI:
 
 ```bash
-go build -o ./bin/xmppqrd ./cmd/xmppqrd
-go build -o ./bin/xmppqrctl ./cmd/xmppqrctl
+go build -o ./xmppqrd ./cmd/xmppqrd
+go build -o ./xmppqrctl ./cmd/xmppqrctl
 ```
 
 If you only want to check the admin CLI path:
@@ -136,8 +136,8 @@ One practical flow is:
 ```bash
 install -d /etc/xmppqr /etc/xmppqr/tls
 cp internal/config/example.yaml /etc/xmppqr/xmppqrd.yaml
-install -m 0755 ./bin/xmppqrd /usr/local/bin/xmppqrd
-install -m 0755 ./bin/xmppqrctl /usr/local/bin/xmppqrctl
+install -m 0755 ./xmppqrd /usr/local/bin/xmppqrd
+install -m 0755 ./xmppqrctl /usr/local/bin/xmppqrctl
 ```
 
 ## Configuration
@@ -230,21 +230,23 @@ Then either let the daemon migrate automatically with `db.migrate_on_start: true
 xmppqrctl migrate -config /etc/xmppqr/xmppqrd.yaml
 ```
 
+When using PostgreSQL, both `xmppqrd` and `xmppqrctl` normalize legacy localpart-only usernames to bare JIDs using `server.domain`. For example, an older `test` row becomes `test@example.com`.
+
 ## Running The Server
 
 Development run with defaults:
 
 ```bash
-./bin/xmppqrd
+./xmppqrd -config /etc/xmppqr/xmppqrd.yaml
 ```
 
 What that does by default:
 
 - uses `localhost` as the domain if none is configured
 - listens on `:5222` and `:5223`
-- uses in-memory storage
 - uses `/etc/xmppqr/tls/cert.pem` and `/etc/xmppqr/tls/key.pem` unless overridden in config
 - does not create any users unless you explicitly pass `-dev-user`
+- uses the database configured in `/etc/xmppqr/xmppqrd.yaml`
 
 Configured run:
 
@@ -269,36 +271,37 @@ Persistent user management currently goes through `xmppqrctl` and PostgreSQL.
 Create a user:
 
 ```bash
-xmppqrctl useradd alice -config /etc/xmppqr/xmppqrd.yaml
+xmppqrctl useradd alice
 ```
 
 Or pass the password non-interactively:
 
 ```bash
-xmppqrctl useradd alice -config /etc/xmppqr/xmppqrd.yaml -password 'correct horse battery staple'
+xmppqrctl useradd alice -password 'correct horse battery staple'
 ```
 
 Replace an existing user:
 
 ```bash
-xmppqrctl useradd alice -config /etc/xmppqr/xmppqrd.yaml -password 'new-password' -replace
+xmppqrctl useradd alice -password 'new-password' -replace
 ```
 
 List users:
 
 ```bash
-xmppqrctl userlist -config /etc/xmppqr/xmppqrd.yaml
+xmppqrctl userlist
 ```
 
 Delete a user:
 
 ```bash
-xmppqrctl userdel alice -config /etc/xmppqr/xmppqrd.yaml
+xmppqrctl userdel alice
 ```
 
 Operational details:
 
-- The CLI stores local usernames, not full JIDs. `alice` becomes `alice@<server.domain>` for login purposes.
+- The canonical account key is the bare JID. `xmppqrctl useradd alice` stores `alice@<server.domain>`.
+- `xmppqrctl` auto-loads config from `XMPPQR_CONFIG`, then `./xmppqrd.yaml`, then `/etc/xmppqr/xmppqrd.yaml`, unless `-config` is passed explicitly.
 - `xmppqrctl` requires `db.driver: postgres`. It will fail on the in-memory backend by design.
 - Passwords are stored as SCRAM-SHA-256 and SCRAM-SHA-512 material plus an Argon2-style storage hash payload used by the server code.
 
@@ -370,7 +373,7 @@ Check the basics first:
 Useful commands:
 
 ```bash
-xmppqrctl userlist -config /etc/xmppqr/xmppqrd.yaml
+xmppqrctl userlist
 xmppqrctl tls-probe xmpp.example.com:5223
 ```
 
@@ -461,7 +464,7 @@ This repo is advancing quickly, but it is not a finished production server yet. 
 
 - no packaged releases
 - no polished service manager units or installer
-- bootstrap-user behavior still baked into the daemon
+- bootstrap-user path still exists for development
 - HTTP upload and WebSocket deployment still expect operator-side proxying/TLS decisions
 - ongoing churn in the x3dhpq feature set
 

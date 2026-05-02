@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/danielinux/xmppqr/internal/accountjid"
 	"github.com/danielinux/xmppqr/internal/auth"
 	"github.com/danielinux/xmppqr/internal/block"
 	"github.com/danielinux/xmppqr/internal/bookmarks"
@@ -266,6 +267,10 @@ func openStores(ctx context.Context, cfg *config.Config) (*storage.Stores, *pg.D
 				return nil, nil, fmt.Errorf("migrate: %w", err)
 			}
 		}
+		if err := db.NormalizeUsernamesToBareJIDs(ctx, cfg.Server.Domain); err != nil {
+			db.Close()
+			return nil, nil, fmt.Errorf("normalize users: %w", err)
+		}
 		return db.Stores(), db, nil
 	}
 	return memstore.New(), nil, nil
@@ -431,6 +436,10 @@ func requireServerCert(cfg *config.Config) error {
 }
 
 func seedDevUser(ctx context.Context, stores *storage.Stores, username, domain, password string) error {
+	accountJID, _, err := accountjid.Normalize(username, domain)
+	if err != nil {
+		return err
+	}
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return err
@@ -449,7 +458,7 @@ func seedDevUser(ctx context.Context, stores *storage.Stores, username, domain, 
 		return err
 	}
 	u := &storage.User{
-		Username:     username,
+		Username:     accountJID,
 		ScramSalt:    salt,
 		ScramIter:    iter,
 		Argon2Params: encoded,

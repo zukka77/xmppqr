@@ -56,7 +56,7 @@ func TestRegisterCreatesUser(t *testing.T) {
 		t.Errorf("expected result IQ; got: %s", raw)
 	}
 
-	u, err := stores.Users.Get(context.Background(), "newuser")
+	u, err := stores.Users.Get(context.Background(), "newuser@example.com")
 	if err != nil {
 		t.Fatalf("get user: %v", err)
 	}

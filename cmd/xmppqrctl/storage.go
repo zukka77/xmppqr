@@ -28,6 +28,10 @@ func openStores(ctx context.Context, cfg *config.Config) (*storage.Stores, func(
 				return nil, nil, err
 			}
 		}
+		if err := db.NormalizeUsernamesToBareJIDs(ctx, cfg.Server.Domain); err != nil {
+			db.Close()
+			return nil, nil, err
+		}
 		return db.Stores(), db.Close, nil
 	case "memory":
 		return nil, nil, errors.New("memory driver is not persistent; use postgres for this command")
@@ -42,6 +46,10 @@ func openStoresWithMigrate(ctx context.Context, cfg *config.Config) (*storage.St
 	}
 	db, err := pg.Open(ctx, cfg.DB.DSN, cfg.DB.MaxConns)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := db.NormalizeUsernamesToBareJIDs(ctx, cfg.Server.Domain); err != nil {
+		db.Close()
 		return nil, nil, nil, err
 	}
 	return db.Stores(), db.Close, db, nil

@@ -1272,7 +1272,7 @@ func TestIBREnabledAndDisabled(t *testing.T) {
 			t.Fatalf("expected result IQ after registration; got: %s", result)
 		}
 
-		u, err := stores.Users.Get(context.Background(), "newuser")
+		u, err := stores.Users.Get(context.Background(), "newuser@example.com")
 		if err != nil || u == nil {
 			t.Fatalf("user not created: err=%v user=%v", err, u)
 		}

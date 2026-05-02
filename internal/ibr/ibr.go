@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/danielinux/xmppqr/internal/accountjid"
 	"github.com/danielinux/xmppqr/internal/auth"
 	"github.com/danielinux/xmppqr/internal/stanza"
 	"github.com/danielinux/xmppqr/internal/storage"
@@ -65,12 +66,16 @@ func (s *Service) handleSet(ctx context.Context, iq *stanza.IQ) ([]byte, error) 
 	if _, parseErr := stanza.Parse(username + "@" + s.domain); parseErr != nil {
 		return nil, &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrJIDMalformed}
 	}
+	accountJID, _, normErr := accountjid.Normalize(username, s.domain)
+	if normErr != nil {
+		return nil, &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrJIDMalformed}
+	}
 
 	if len(password) < s.minPasswordLen {
 		return nil, &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrNotAcceptable}
 	}
 
-	existing, _ := s.stores.Users.Get(ctx, username)
+	existing, _ := s.stores.Users.Get(ctx, accountJID)
 	if existing != nil {
 		return nil, &stanza.StanzaError{Type: stanza.ErrorTypeCancel, Condition: stanza.ErrConflict}
 	}
@@ -96,7 +101,7 @@ func (s *Service) handleSet(ctx context.Context, iq *stanza.IQ) ([]byte, error) 
 	}
 
 	u := &storage.User{
-		Username:     username,
+		Username:     accountJID,
 		ScramSalt:    salt,
 		ScramIter:    iter,
 		Argon2Params: encoded,

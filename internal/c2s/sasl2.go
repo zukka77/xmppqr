@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/danielinux/xmppqr/internal/accountjid"
 	"github.com/danielinux/xmppqr/internal/auth"
 	"github.com/danielinux/xmppqr/internal/storage"
 )
@@ -62,11 +63,18 @@ func handleAuthenticate(ctx context.Context, s *Session, start xml.StartElement,
 	}
 
 	lookup := func(username string) (*auth.StoredCreds, error) {
-		u, err := s.cfg.Stores.Users.Get(ctx, username)
+		candidates, _, err := accountjid.LookupCandidates(username, s.cfg.Domain)
 		if err != nil {
 			return nil, err
 		}
-		return userToCreds(u, mech)
+		var u *storage.User
+		for _, candidate := range candidates {
+			u, err = s.cfg.Stores.Users.Get(ctx, candidate)
+			if err == nil {
+				return userToCreds(u, mech)
+			}
+		}
+		return nil, err
 	}
 
 	srv, err := newAuthServer(mech, lookup, cb)
@@ -91,7 +99,11 @@ func handleAuthenticate(ctx context.Context, s *Session, start xml.StartElement,
 		return nil, err
 	}
 
-	return &authResult{Username: srv.Username(), ServerFinal: out, Style: authStyleSASL2}, nil
+	_, local, err := accountjid.Normalize(srv.Username(), s.cfg.Domain)
+	if err != nil {
+		return nil, err
+	}
+	return &authResult{Username: local, ServerFinal: out, Style: authStyleSASL2}, nil
 }
 
 func sasl2Failure(condition string) []byte {
@@ -121,11 +133,18 @@ func handleLegacyAuth(ctx context.Context, s *Session, start xml.StartElement, r
 	}
 
 	lookup := func(username string) (*auth.StoredCreds, error) {
-		u, err := s.cfg.Stores.Users.Get(ctx, username)
+		candidates, _, err := accountjid.LookupCandidates(username, s.cfg.Domain)
 		if err != nil {
 			return nil, err
 		}
-		return userToCreds(u, mech)
+		var u *storage.User
+		for _, candidate := range candidates {
+			u, err = s.cfg.Stores.Users.Get(ctx, candidate)
+			if err == nil {
+				return userToCreds(u, mech)
+			}
+		}
+		return nil, err
 	}
 
 	srv, err := newAuthServer(mech, lookup, cb)
@@ -149,7 +168,11 @@ func handleLegacyAuth(ctx context.Context, s *Session, start xml.StartElement, r
 		return nil, err
 	}
 
-	return &authResult{Username: srv.Username(), ServerFinal: out, Style: authStyleLegacy}, nil
+	_, local, err := accountjid.Normalize(srv.Username(), s.cfg.Domain)
+	if err != nil {
+		return nil, err
+	}
+	return &authResult{Username: local, ServerFinal: out, Style: authStyleLegacy}, nil
 }
 
 func legacySASLFailure(condition string) []byte {
@@ -187,7 +210,18 @@ func handleLegacyPlainAuth(ctx context.Context, s *Session, raw []byte) (*authRe
 		return nil, fmt.Errorf("plain: unsupported authzid %q", authzid)
 	}
 
-	u, err := s.cfg.Stores.Users.Get(ctx, authcid)
+	candidates, local, err := accountjid.LookupCandidates(authcid, s.cfg.Domain)
+	if err != nil {
+		_, _ = s.enc.WriteRaw(legacySASLFailure("not-authorized"))
+		return nil, err
+	}
+	var u *storage.User
+	for _, candidate := range candidates {
+		u, err = s.cfg.Stores.Users.Get(ctx, candidate)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		_, _ = s.enc.WriteRaw(legacySASLFailure("not-authorized"))
 		return nil, err
@@ -202,7 +236,7 @@ func handleLegacyPlainAuth(ctx context.Context, s *Session, raw []byte) (*authRe
 		return nil, fmt.Errorf("plain: password verification failed")
 	}
 
-	return &authResult{Username: authcid, Style: authStyleLegacy}, nil
+	return &authResult{Username: local, Style: authStyleLegacy}, nil
 }
 
 func newAuthServer(mech auth.Mechanism, lookup func(username string) (*auth.StoredCreds, error), cb auth.ChannelBinding) (*auth.Server, error) {
