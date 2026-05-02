@@ -21,20 +21,28 @@ func New(ps *pubsub.Service, logger *slog.Logger) *Service {
 }
 
 func (svc *Service) HandleIQ(ctx context.Context, from stanza.JID, iq *stanza.IQ) ([]byte, error) {
-	if iq.To != "" && iq.To != from.Bare().String() {
-		se := &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
-		errBytes, err := se.Marshal()
+	target := from.Bare()
+	if iq.To != "" {
+		j, err := stanza.Parse(iq.To)
 		if err != nil {
-			return nil, err
+			return nil, &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrJIDMalformed}
 		}
-		resp := &stanza.IQ{
-			ID:      iq.ID,
-			From:    iq.To,
-			To:      iq.From,
-			Type:    stanza.IQError,
-			Payload: errBytes,
+		target = j.Bare()
+		if iq.Type != stanza.IQGet && target.String() != from.Bare().String() {
+			se := &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+			errBytes, err := se.Marshal()
+			if err != nil {
+				return nil, err
+			}
+			resp := &stanza.IQ{
+				ID:      iq.ID,
+				From:    iq.To,
+				To:      iq.From,
+				Type:    stanza.IQError,
+				Payload: errBytes,
+			}
+			return resp.Marshal()
 		}
-		return resp.Marshal()
 	}
 
 	// Auto-create node on publish if it doesn't exist yet.
@@ -44,7 +52,7 @@ func (svc *Service) HandleIQ(ctx context.Context, from stanza.JID, iq *stanza.IQ
 		}
 	}
 
-	return svc.ps.HandleIQ(ctx, from.Bare(), iq)
+	return svc.ps.HandleIQ(ctx, target, iq)
 }
 
 // publishNode extracts the node attribute from a publish element in the payload,

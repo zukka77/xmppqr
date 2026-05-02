@@ -196,3 +196,48 @@ func TestPEPForbiddenWrongTo(t *testing.T) {
 		t.Fatalf("expected error IQ, got: %s", raw)
 	}
 }
+
+func TestPEPGetAllowsContactFetch(t *testing.T) {
+	stores := memstore.New()
+	r := router.New()
+	logger := slog.Default()
+	ps := pubsub.New(stores.PEP, r, logger, 0)
+	svc := New(ps, logger)
+
+	alice, _ := stanza.Parse("alice@example.com/work")
+	bob, _ := stanza.Parse("bob@example.com/phone")
+	node := "urn:xmppqr:x3dhpq:bundle:0"
+
+	publishIQ := buildPEPPublishIQ(node, "bundle1", []byte(`<bundle xmlns='urn:xmppqr:x3dhpq:bundle:0'><identity/></bundle>`))
+	if _, err := svc.HandleIQ(context.Background(), alice, publishIQ); err != nil {
+		t.Fatalf("alice publish: %v", err)
+	}
+
+	fetchIQ := &stanza.IQ{
+		ID:   "fetch-contact",
+		From: "bob@example.com/phone",
+		To:   "alice@example.com",
+		Type: stanza.IQGet,
+	}
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	psEl := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/pubsub", Local: "pubsub"}}
+	itemsEl := xml.StartElement{
+		Name: xml.Name{Local: "items"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "node"}, Value: node}},
+	}
+	enc.EncodeToken(psEl)
+	enc.EncodeToken(itemsEl)
+	enc.EncodeToken(itemsEl.End())
+	enc.EncodeToken(psEl.End())
+	enc.Flush()
+	fetchIQ.Payload = buf.Bytes()
+
+	raw, err := svc.HandleIQ(context.Background(), bob, fetchIQ)
+	if err != nil {
+		t.Fatalf("bob fetch: %v", err)
+	}
+	if !bytes.Contains(raw, []byte("bundle1")) {
+		t.Fatalf("expected contact bundle in response, got: %s", raw)
+	}
+}
