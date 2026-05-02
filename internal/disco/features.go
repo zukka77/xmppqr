@@ -39,6 +39,7 @@ func DefaultServer() *Features {
 			"http://jabber.org/protocol/disco#info",
 			"http://jabber.org/protocol/disco#items",
 			"http://jabber.org/protocol/pubsub",
+			"urn:xmpp:bookmarks:1#compat",
 			"urn:xmpp:blocking",
 			"vcard-temp",
 			"urn:xmppqr:x3dhpq:0",

@@ -70,6 +70,7 @@ func TestDefaultServerHasLegacyFeatures(t *testing.T) {
 		"jabber:iq:version",
 		"jabber:iq:last",
 		"urn:xmpp:time",
+		"urn:xmpp:bookmarks:1#compat",
 		"urn:xmppqr:x3dhpq:0",
 		"urn:xmppqr:x3dhpq:devicelist:0+notify",
 		"urn:xmppqr:x3dhpq:audit:0+notify",
