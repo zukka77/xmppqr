@@ -69,8 +69,15 @@ func runStream(ctx context.Context, s *Session) error {
 	if s.cfg.Router != nil {
 		s.cfg.Router.Register(s)
 		defer func() {
-			s.parkIfResumable()
+			parked := s.parkIfResumable()
 			s.cfg.Router.Unregister(s)
+			// Only evict MUC occupants when the session is permanently
+			// gone. A parked SM session may resume with the same FullJID,
+			// in which case the user is still "in the room" from the
+			// MUC's perspective.
+			if !parked && s.cfg.Modules != nil && s.cfg.Modules.MUC != nil && s.jid.Resource != "" {
+				s.cfg.Modules.MUC.OnSessionEnd(context.Background(), s.jid)
+			}
 		}()
 	}
 

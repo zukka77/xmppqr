@@ -189,6 +189,74 @@ func TestSelfPresenceUsesExplicitMUCUserNamespace(t *testing.T) {
 	}
 }
 
+func TestJoinSameBareJIDDifferentResourceTakesOver(t *testing.T) {
+	room, r := makeRoom(t)
+	room.affiliations["alice@example.com"] = AffOwner
+
+	// First join: alice/phone.
+	_ = joinOccupant(t, room, r, "alice@example.com/phone", "Alice")
+
+	// Simulate ungraceful disconnect: no <presence type='unavailable'/>,
+	// just a fresh join from a different resource. Without the takeover
+	// logic this would return <conflict/> and the user would be locked
+	// out of the room.
+	j2, _ := stanza.Parse("alice@example.com/laptop")
+	s2 := &mockSession{jid: j2}
+	r.Register(s2)
+	occ := &Occupant{Nick: "Alice", FullJID: j2}
+	if err := room.Join(context.Background(), occ, "", r, nil, false); err != nil {
+		t.Fatalf("rejoin should take over stale entry: %v", err)
+	}
+	room.mu.RLock()
+	cur := room.occupants["Alice"]
+	room.mu.RUnlock()
+	if cur == nil || cur.FullJID.Resource != "laptop" {
+		t.Fatalf("expected occupant FullJID resource=laptop, got %+v", cur)
+	}
+}
+
+func TestJoinSameNickDifferentBareJIDStillConflicts(t *testing.T) {
+	room, r := makeRoom(t)
+	room.affiliations["alice@example.com"] = AffOwner
+
+	_ = joinOccupant(t, room, r, "alice@example.com/phone", "Alice")
+
+	// Different bare JID using the same nick — this is a real conflict.
+	j2, _ := stanza.Parse("eve@example.com/phone")
+	s2 := &mockSession{jid: j2}
+	r.Register(s2)
+	occ := &Occupant{Nick: "Alice", FullJID: j2}
+	err := room.Join(context.Background(), occ, "", r, nil, false)
+	if err == nil {
+		t.Fatal("different user with same nick must conflict")
+	}
+	se, ok := err.(*stanza.StanzaError)
+	if !ok || se.Condition != stanza.ErrConflict {
+		t.Fatalf("expected <conflict/>, got %v", err)
+	}
+}
+
+func TestSelfPingAcceptsResourceChangeForSameBareJID(t *testing.T) {
+	room, r := makeRoom(t)
+	room.affiliations["alice@example.com"] = AffOwner
+
+	_ = joinOccupant(t, room, r, "alice@example.com/phone", "Alice")
+
+	// Self-ping from a new resource on the same bare JID — should succeed
+	// and silently update the occupant's FullJID, mirroring the SM-resume
+	// case where a client lands on a fresh resource.
+	newJID, _ := stanza.Parse("alice@example.com/laptop")
+	if err := room.SelfPing(context.Background(), newJID, r); err != nil {
+		t.Fatalf("self-ping from new resource should refresh, got %v", err)
+	}
+	room.mu.RLock()
+	cur := room.occupants["Alice"]
+	room.mu.RUnlock()
+	if cur.FullJID.Resource != "laptop" {
+		t.Fatalf("self-ping should refresh FullJID resource; got %s", cur.FullJID.Resource)
+	}
+}
+
 func TestJoinDeliversSubjectEvenWhenEmpty(t *testing.T) {
 	room, r := makeRoom(t)
 	room.affiliations["alice@example.com"] = AffOwner

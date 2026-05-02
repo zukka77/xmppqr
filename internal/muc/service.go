@@ -147,6 +147,21 @@ func (s *Service) getRoom(roomJID stanza.JID) *Room {
 	return nil
 }
 
+// OnSessionEnd evicts all occupant entries belonging to fullJID across every
+// room, broadcasting the corresponding <presence type='unavailable'/> stanzas
+// to remaining occupants. Call this when a c2s session is fully torn down
+// (NOT when it's being parked for SM resume — in that case the occupant
+// must remain so a resumed session continues seamlessly). Without this hook,
+// stale occupants accumulate after ungraceful disconnects and block the
+// user's subsequent rejoin with a <conflict/>.
+func (s *Service) OnSessionEnd(ctx context.Context, fullJID stanza.JID) {
+	s.rooms.Range(func(_, v interface{}) bool {
+		room := v.(*Room)
+		_ = room.Leave(ctx, fullJID, s.router)
+		return true
+	})
+}
+
 func (s *Service) listPublicRooms() []*Room {
 	var out []*Room
 	s.rooms.Range(func(_, v interface{}) bool {

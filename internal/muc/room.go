@@ -136,7 +136,18 @@ func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *ro
 	r.preloadFromStoreIfEmpty(ctx)
 
 	if existing, clash := r.occupants[occ.Nick]; clash {
-		if !existing.FullJID.Equal(occ.FullJID) {
+		switch {
+		case existing.FullJID.Equal(occ.FullJID):
+			// Same session re-sending presence; idempotent.
+		case existing.FullJID.Bare().Equal(occ.FullJID.Bare()):
+			// Same user, different resource. The old session is presumed
+			// gone (an ungraceful disconnect leaves the occupant entry
+			// stranded because no <presence type='unavailable'/> ever
+			// arrived). Take over the entry rather than returning
+			// <conflict/>, which would lock the user out of the room
+			// for the lifetime of the stale entry.
+			delete(r.occupants, occ.Nick)
+		default:
 			return &stanza.StanzaError{Type: stanza.ErrorTypeCancel, Condition: stanza.ErrConflict}
 		}
 	}
@@ -821,11 +832,26 @@ func buildDestroyX(altJID, reason string) []byte {
 }
 
 func (r *Room) SelfPing(ctx context.Context, fromFullJID stanza.JID, rtr *router.Router) error {
+	// Fast path: exact match under the read lock.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	for _, occ := range r.occupants {
 		if occ.FullJID.Equal(fromFullJID) {
+			r.mu.RUnlock()
+			return nil
+		}
+	}
+	r.mu.RUnlock()
+
+	// Slow path: SM-resume can land the user on a new resource without a
+	// fresh presence to <room/nick>. If the bare JID still matches the
+	// occupant, refresh the FullJID rather than failing — failing here
+	// triggers an unnecessary rejoin cycle on the client and risks the
+	// stale-occupant lockout discussed in Room.Join.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, occ := range r.occupants {
+		if occ.FullJID.Bare().Equal(fromFullJID.Bare()) {
+			occ.FullJID = fromFullJID
 			return nil
 		}
 	}

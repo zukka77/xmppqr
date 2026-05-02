@@ -199,9 +199,9 @@ func (s *Session) drainOutboundToQueue() {
 	}
 }
 
-func (s *Session) parkIfResumable() {
+func (s *Session) parkIfResumable() bool {
 	if s.smQueue == nil || s.smResumeToken == "" || s.cfg.ResumeStore == nil {
-		return
+		return false
 	}
 	s.drainOutboundToQueue()
 	timeout := s.cfg.ResumeTimeout
@@ -214,7 +214,10 @@ func (s *Session) parkIfResumable() {
 		LastInH:      atomic.LoadUint32(&s.smInH),
 		ExpiresAt:    time.Now().Add(timeout),
 	}
-	_ = s.cfg.ResumeStore.Park(sm.ResumeToken(s.smResumeToken), state)
+	if err := s.cfg.ResumeStore.Park(sm.ResumeToken(s.smResumeToken), state); err != nil {
+		return false
+	}
+	return true
 }
 
 func parseMessageStart(raw []byte) (xml.StartElement, []byte, error) {
