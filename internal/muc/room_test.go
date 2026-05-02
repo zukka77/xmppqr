@@ -151,6 +151,40 @@ func TestSelfPing(t *testing.T) {
 	}
 }
 
+func TestSelfPresenceUsesExplicitMUCUserNamespace(t *testing.T) {
+	raw := buildSelfPresence("room@conference.example.com/Alice", "alice@example.com/phone", RoleModerator, AffOwner)
+
+	dec := xml.NewDecoder(strings.NewReader(string(raw)))
+	var sawX, sawItem, sawStatus bool
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch se.Name.Local {
+		case "x":
+			if se.Name.Space == nsMUCUser {
+				sawX = true
+			}
+		case "item":
+			if se.Name.Space == nsMUCUser {
+				sawItem = true
+			}
+		case "status":
+			if se.Name.Space == nsMUCUser {
+				sawStatus = true
+			}
+		}
+	}
+	if !sawX || !sawItem || !sawStatus {
+		t.Fatalf("expected muc#user namespace on x/item/status, got: %s", raw)
+	}
+}
+
 func TestAffiliationChange(t *testing.T) {
 	stores := memstore.New()
 	room, r := makeRoom(t)

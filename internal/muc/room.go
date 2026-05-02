@@ -422,7 +422,7 @@ func buildMUCUserX(role, affiliation int, realJID string) []byte {
 	x := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "x"}}
 	enc.EncodeToken(x)
 	item := xml.StartElement{
-		Name: xml.Name{Local: "item"},
+		Name: xml.Name{Space: nsMUCUser, Local: "item"},
 		Attr: []xml.Attr{
 			{Name: xml.Name{Local: "affiliation"}, Value: affiliationName(affiliation)},
 			{Name: xml.Name{Local: "role"}, Value: roleName(role)},
@@ -444,7 +444,7 @@ func buildMUCUserXSelf(role, affiliation int) []byte {
 	x := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "x"}}
 	enc.EncodeToken(x)
 	item := xml.StartElement{
-		Name: xml.Name{Local: "item"},
+		Name: xml.Name{Space: nsMUCUser, Local: "item"},
 		Attr: []xml.Attr{
 			{Name: xml.Name{Local: "affiliation"}, Value: affiliationName(affiliation)},
 			{Name: xml.Name{Local: "role"}, Value: roleName(role)},
@@ -453,7 +453,7 @@ func buildMUCUserXSelf(role, affiliation int) []byte {
 	enc.EncodeToken(item)
 	enc.EncodeToken(item.End())
 	status := xml.StartElement{
-		Name: xml.Name{Local: "status"},
+		Name: xml.Name{Space: nsMUCUser, Local: "status"},
 		Attr: []xml.Attr{{Name: xml.Name{Local: "code"}, Value: "110"}},
 	}
 	enc.EncodeToken(status)
@@ -600,4 +600,3 @@ func marshalResultIQ(iq *stanza.IQ, payload []byte) []byte {
 	raw, _ := resp.Marshal()
 	return raw
 }
-
