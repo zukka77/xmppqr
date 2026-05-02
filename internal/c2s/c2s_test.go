@@ -738,6 +738,19 @@ func TestMAMArchivedOnSend(t *testing.T) {
 	sendStr(t, client, `<message to='bob@example.com' xmlns='jabber:client'><body>hi</body></message>`)
 	time.Sleep(100 * time.Millisecond)
 
+	select {
+	case delivered := <-target.ch:
+		got := string(delivered)
+		if !strings.Contains(got, "from='alice@example.com/") && !strings.Contains(got, `from="alice@example.com/`) {
+			t.Fatalf("expected routed message from alice resource, got: %s", got)
+		}
+		if !strings.Contains(got, "to='bob@example.com'") && !strings.Contains(got, `to="bob@example.com"`) {
+			t.Fatalf("expected routed message to bob, got: %s", got)
+		}
+	default:
+		t.Fatal("expected routed message delivery")
+	}
+
 	archived, err := stores.MAM.Query(context.Background(), "alice@example.com", nil, nil, nil, 10)
 	if err != nil {
 		t.Fatalf("mam query: %v", err)

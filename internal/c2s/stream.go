@@ -343,12 +343,14 @@ func handleOutboundMessage(ctx context.Context, s *Session, start xml.StartEleme
 		}
 	}
 
+	routedRaw := rewriteStanzaFrom(raw, s.jid.String())
+
 	if mods != nil {
 		senderBare := s.jid.Bare().String()
-		msg, parseErr := stanza.ParseMessage(start, raw)
+		msg, parseErr := stanza.ParseMessage(start, routedRaw)
 
 		if parseErr == nil && mods.MAM != nil {
-			_ = mods.MAM.Archive(ctx, senderBare, msg, 1, raw)
+			_ = mods.MAM.Archive(ctx, senderBare, msg, 1, routedRaw)
 		}
 
 		if mods.Carbons != nil && s.cfg.Router != nil {
@@ -357,15 +359,15 @@ func handleOutboundMessage(ctx context.Context, s *Session, start xml.StartEleme
 			for _, sess := range allRes {
 				jids = append(jids, sess.JID())
 			}
-			_ = mods.Carbons.DeliverCarbons(ctx, s.jid.Bare(), j, raw, 1, jids)
+			_ = mods.Carbons.DeliverCarbons(ctx, s.jid.Bare(), j, routedRaw, 1, jids)
 		}
 	}
 
 	if s.cfg.Router != nil {
 		if j.Resource != "" {
-			_ = s.cfg.Router.RouteToFull(ctx, j, raw)
+			_ = s.cfg.Router.RouteToFull(ctx, j, routedRaw)
 		} else {
-			_, _ = s.cfg.Router.RouteToBare(ctx, j, raw)
+			_, _ = s.cfg.Router.RouteToBare(ctx, j, routedRaw)
 		}
 	}
 
@@ -922,4 +924,38 @@ func xmlEscape(s string) string {
 	var b bytes.Buffer
 	xml.EscapeText(&b, []byte(s))
 	return b.String()
+}
+
+func rewriteStanzaFrom(raw []byte, from string) []byte {
+	end := bytes.IndexByte(raw, '>')
+	if end <= 0 {
+		return raw
+	}
+
+	head := raw[:end]
+	tail := raw[end:]
+	needle := []byte("from=")
+	idx := bytes.Index(head, needle)
+	if idx >= 0 {
+		value := head[idx+len(needle):]
+		if len(value) > 1 {
+			q := value[0]
+			closeIdx := bytes.IndexByte(value[1:], q)
+			if closeIdx >= 0 {
+				out := make([]byte, 0, len(raw)+len(from))
+				out = append(out, head[:idx]...)
+				out = append(out, []byte("from='"+xmlEscape(from)+"'")...)
+				out = append(out, value[closeIdx+2:]...)
+				out = append(out, tail...)
+				return out
+			}
+		}
+		return raw
+	}
+
+	out := make([]byte, 0, len(raw)+len(from)+8)
+	out = append(out, head...)
+	out = append(out, []byte(" from='"+xmlEscape(from)+"'")...)
+	out = append(out, tail...)
+	return out
 }
