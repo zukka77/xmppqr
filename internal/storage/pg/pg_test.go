@@ -287,6 +287,177 @@ func TestPGBlock(t *testing.T) {
 	}
 }
 
+func TestPGMUCSubject(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := &pgMUC{pool: db.pool}
+
+	room := &storage.MUCRoom{JID: "pgtest_subj@conference.example.com", Persistent: true, CreatedAt: time.Now()}
+	if err := s.PutRoom(ctx, room); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.DeleteRoom(ctx, room.JID) })
+
+	sub, by, ts, err := s.GetRoomSubject(ctx, room.JID)
+	if err != nil {
+		t.Fatalf("get before put: %v", err)
+	}
+	if sub != "" || by != "" || !ts.IsZero() {
+		t.Fatal("expected empty subject on fresh room")
+	}
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := s.PutRoomSubject(ctx, room.JID, "Welcome", "alice", now); err != nil {
+		t.Fatal(err)
+	}
+	sub, by, ts, err = s.GetRoomSubject(ctx, room.JID)
+	if err != nil || sub != "Welcome" || by != "alice" || !ts.Equal(now) {
+		t.Fatalf("get after put: sub=%q by=%q ts=%v err=%v", sub, by, ts, err)
+	}
+
+	now2 := now.Add(time.Minute)
+	if err := s.PutRoomSubject(ctx, room.JID, "Updated", "bob", now2); err != nil {
+		t.Fatal(err)
+	}
+	sub, by, _, err = s.GetRoomSubject(ctx, room.JID)
+	if err != nil || sub != "Updated" || by != "bob" {
+		t.Fatalf("overwrite: sub=%q by=%q err=%v", sub, by, err)
+	}
+}
+
+func TestPGMUCHistory(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	s := &pgMUC{pool: db.pool}
+
+	room := &storage.MUCRoom{JID: "pgtest_hist@conference.example.com", Persistent: true, CreatedAt: time.Now()}
+	if err := s.PutRoom(ctx, room); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.DeleteRoom(ctx, room.JID) })
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 0; i < 3; i++ {
+		h := &storage.MUCHistory{
+			RoomJID:   room.JID,
+			SenderJID: "alice@example.com",
+			TS:        base.Add(time.Duration(i) * time.Second),
+			StanzaID:  "sid" + string(rune('0'+i)),
+			StanzaXML: []byte("<message/>"),
+		}
+		id, err := s.AppendHistory(ctx, h)
+		if err != nil || id == 0 {
+			t.Fatalf("append %d: id=%d err=%v", i, id, err)
+		}
+	}
+
+	all, err := s.QueryHistory(ctx, room.JID, nil, nil, 0)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("query all: len=%d err=%v", len(all), err)
+	}
+
+	after := base.Add(500 * time.Millisecond)
+	some, err := s.QueryHistory(ctx, room.JID, nil, &after, 0)
+	if err != nil || len(some) != 2 {
+		t.Fatalf("query after: len=%d err=%v", len(some), err)
+	}
+
+	before := base.Add(2 * time.Second)
+	some, err = s.QueryHistory(ctx, room.JID, &before, nil, 0)
+	if err != nil || len(some) != 2 {
+		t.Fatalf("query before: len=%d err=%v", len(some), err)
+	}
+
+	limited, err := s.QueryHistory(ctx, room.JID, nil, nil, 2)
+	if err != nil || len(limited) != 2 {
+		t.Fatalf("query limit: len=%d err=%v", len(limited), err)
+	}
+
+	del, err := s.DeleteHistoryBefore(ctx, room.JID, base.Add(2*time.Second))
+	if err != nil || del != 2 {
+		t.Fatalf("delete before: del=%d err=%v", del, err)
+	}
+	remaining, _ := s.QueryHistory(ctx, room.JID, nil, nil, 0)
+	if len(remaining) != 1 {
+		t.Fatalf("expected 1 remaining, got %d", len(remaining))
+	}
+}
+
+func TestPGMUCMAM(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	ms := &pgMUC{pool: db.pool}
+	s := &pgMAM{pool: db.pool}
+
+	room := &storage.MUCRoom{JID: "pgtest_mam@conference.example.com", Persistent: true, CreatedAt: time.Now()}
+	if err := ms.PutRoom(ctx, room); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ms.DeleteRoom(ctx, room.JID) })
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 0; i < 3; i++ {
+		m := &storage.MUCArchivedStanza{
+			RoomJID:       room.JID,
+			SenderBareJID: "alice@example.com",
+			TS:            base.Add(time.Duration(i) * time.Second),
+			StanzaID:      "sid" + string(rune('0'+i)),
+			OriginID:      "oid" + string(rune('0'+i)),
+			StanzaXML:     []byte("<message/>"),
+		}
+		id, err := s.AppendMUC(ctx, m)
+		if err != nil || id == 0 {
+			t.Fatalf("append muc %d: id=%d err=%v", i, id, err)
+		}
+	}
+	extra := &storage.MUCArchivedStanza{
+		RoomJID:       room.JID,
+		SenderBareJID: "bob@example.com",
+		TS:            base.Add(3 * time.Second),
+		StanzaXML:     []byte("<message/>"),
+	}
+	if _, err := s.AppendMUC(ctx, extra); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := s.QueryMUC(ctx, room.JID, nil, nil, nil, 0)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("query all: len=%d err=%v", len(all), err)
+	}
+
+	alice := storage.JID("alice@example.com")
+	byAlice, err := s.QueryMUC(ctx, room.JID, &alice, nil, nil, 0)
+	if err != nil || len(byAlice) != 3 {
+		t.Fatalf("query by sender: len=%d err=%v", len(byAlice), err)
+	}
+
+	after := base.Add(500 * time.Millisecond)
+	some, err := s.QueryMUC(ctx, room.JID, nil, nil, &after, 0)
+	if err != nil || len(some) != 3 {
+		t.Fatalf("query after: len=%d err=%v", len(some), err)
+	}
+
+	before := base.Add(2 * time.Second)
+	some, err = s.QueryMUC(ctx, room.JID, nil, &before, nil, 0)
+	if err != nil || len(some) != 2 {
+		t.Fatalf("query before: len=%d err=%v", len(some), err)
+	}
+
+	limited, err := s.QueryMUC(ctx, room.JID, nil, nil, nil, 2)
+	if err != nil || len(limited) != 2 {
+		t.Fatalf("query limit: len=%d err=%v", len(limited), err)
+	}
+
+	pruned, err := s.PruneMUC(ctx, room.JID, base.Add(2*time.Second))
+	if err != nil || pruned != 2 {
+		t.Fatalf("prune: pruned=%d err=%v", pruned, err)
+	}
+	remaining, _ := s.QueryMUC(ctx, room.JID, nil, nil, nil, 0)
+	if len(remaining) != 2 {
+		t.Fatalf("expected 2 remaining after prune, got %d", len(remaining))
+	}
+}
+
 func TestPGOffline(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()

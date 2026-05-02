@@ -310,6 +310,8 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 		logger,
 	)
 
+	mamSvc := mam.New(stores.MAM, logger)
+
 	mods := &c2s.Modules{
 		Disco:      disco.DefaultServer(),
 		Roster:     rosterMgr,
@@ -317,13 +319,13 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 		VCard:      vcard.New(stores.PEP),
 		Bookmarks:  bookmarks.New(stores.PEP),
 		Block:      block.New(stores.Block),
-		MAM:        mam.New(stores.MAM, logger),
+		MAM:        mamSvc,
 		Carbons:    carbons.New(rt, logger),
 		Push:       push.New(stores.Push, rt, cfg.Server.Domain, logger),
 		HTTPUpload: uploadSvcFull,
 		PubSub:     ps,
 		PEP:        pep.New(ps, logger),
-		MUC:        muc.New(cfg.Server.Domain, "conference", stores.MUC, rt, logger),
+		MUC:        muc.New(cfg.Server.Domain, "conference", stores.MUC, mamSvc, ps, rt, logger),
 		Metrics:    metrics.New(nil),
 		X3DHPQPolicy: x3dhpq.DomainPolicy{X3DHPQOnlyMode: false},
 		Caps:       capsCache,

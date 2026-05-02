@@ -64,6 +64,12 @@ func (m *memPEP) DeleteItem(_ context.Context, owner, node, itemID string) error
 	return nil
 }
 
+func (m *memPEP) PutSubscription(_ context.Context, _ *storage.PEPSubscription) error  { return nil }
+func (m *memPEP) DeleteSubscription(_ context.Context, _, _, _ string) error            { return nil }
+func (m *memPEP) DeleteSubscriptionsForSubscriber(_ context.Context, _, _ string) error { return nil }
+func (m *memPEP) ListSubscribers(_ context.Context, _, _ string) ([]string, error)      { return nil, nil }
+func (m *memPEP) DeleteNodesForOwner(_ context.Context, _ string) error                 { return nil }
+
 func TestSetGet(t *testing.T) {
 	mgr := New(newMemPEP())
 	ctx := context.Background()

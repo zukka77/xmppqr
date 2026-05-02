@@ -3,6 +3,8 @@ package pg
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/storage"
 	"github.com/jackc/pgx/v5"
@@ -91,4 +93,92 @@ func (s *pgMUC) ListRooms(ctx context.Context) ([]*storage.MUCRoom, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *pgMUC) PutRoomSubject(ctx context.Context, roomJID storage.JID, subject, byNick string, ts time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE muc_rooms SET subject=$1, subject_by=$2, subject_ts=$3 WHERE jid=$4`,
+		subject, byNick, ts, roomJID,
+	)
+	return err
+}
+
+func (s *pgMUC) GetRoomSubject(ctx context.Context, roomJID storage.JID) (subject, byNick string, ts time.Time, err error) {
+	var subjectTS *time.Time
+	err = s.pool.QueryRow(ctx, `
+		SELECT subject, subject_by, subject_ts FROM muc_rooms WHERE jid=$1`, roomJID,
+	).Scan(&subject, &byNick, &subjectTS)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", time.Time{}, errNotFound
+	}
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	if subjectTS != nil {
+		ts = *subjectTS
+	}
+	return subject, byNick, ts, nil
+}
+
+func (s *pgMUC) AppendHistory(ctx context.Context, h *storage.MUCHistory) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO muc_history (room_jid, sender_jid, ts, stanza_id, stanza_xml)
+		VALUES ($1,$2,$3,$4,$5)
+		RETURNING id`,
+		h.RoomJID, nullJID(h.SenderJID), h.TS, h.StanzaID, h.StanzaXML,
+	).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (s *pgMUC) QueryHistory(ctx context.Context, roomJID storage.JID, before, after *time.Time, limit int) ([]*storage.MUCHistory, error) {
+	q := `SELECT id, room_jid, sender_jid, ts, stanza_id, stanza_xml FROM muc_history WHERE room_jid=$1`
+	args := []any{roomJID}
+	n := 2
+	if after != nil {
+		q += fmt.Sprintf(" AND ts > $%d", n)
+		args = append(args, *after)
+		n++
+	}
+	if before != nil {
+		q += fmt.Sprintf(" AND ts < $%d", n)
+		args = append(args, *before)
+		n++
+	}
+	q += " ORDER BY ts ASC"
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d", n)
+		args = append(args, limit)
+	}
+
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*storage.MUCHistory
+	for rows.Next() {
+		h := &storage.MUCHistory{}
+		var senderJID *string
+		if err := rows.Scan(&h.ID, &h.RoomJID, &senderJID, &h.TS, &h.StanzaID, &h.StanzaXML); err != nil {
+			return nil, err
+		}
+		if senderJID != nil {
+			h.SenderJID = *senderJID
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *pgMUC) DeleteHistoryBefore(ctx context.Context, roomJID storage.JID, ts time.Time) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM muc_history WHERE room_jid=$1 AND ts < $2`, roomJID, ts)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }

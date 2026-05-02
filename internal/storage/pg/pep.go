@@ -123,6 +123,59 @@ func (s *pgPEP) DeleteItem(ctx context.Context, owner, node, itemID string) erro
 	return err
 }
 
+func (s *pgPEP) PutSubscription(ctx context.Context, sub *storage.PEPSubscription) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO pep_subscriptions (owner, node, subscriber)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (owner, node, subscriber) DO NOTHING`,
+		sub.Owner, sub.Node, sub.Subscriber,
+	)
+	return err
+}
+
+func (s *pgPEP) DeleteSubscription(ctx context.Context, owner, node, subscriber string) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM pep_subscriptions WHERE owner=$1 AND node=$2 AND subscriber=$3`,
+		owner, node, subscriber)
+	return err
+}
+
+func (s *pgPEP) DeleteSubscriptionsForSubscriber(ctx context.Context, owner, subscriber string) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM pep_subscriptions WHERE owner=$1 AND subscriber=$2`,
+		owner, subscriber)
+	return err
+}
+
+func (s *pgPEP) ListSubscribers(ctx context.Context, owner, node string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT subscriber FROM pep_subscriptions WHERE owner=$1 AND node=$2`,
+		owner, node)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sub string
+		if err := rows.Scan(&sub); err != nil {
+			return nil, err
+		}
+		out = append(out, sub)
+	}
+	return out, rows.Err()
+}
+
+// DeleteNodesForOwner removes every node, its items, and its subscriptions
+// for the given owner.  Used when a MUC room is destroyed.
+// pep_items and pep_subscriptions reference pep_nodes via ON DELETE CASCADE
+// in the schema, but we delete them explicitly for clarity.
+func (s *pgPEP) DeleteNodesForOwner(ctx context.Context, owner string) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM pep_nodes WHERE owner=$1`, owner)
+	return err
+}
+
 func nullBytes(b []byte) *[]byte {
 	if len(b) == 0 {
 		return nil

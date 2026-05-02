@@ -64,6 +64,25 @@ type MUCRoom struct {
 	Persistent bool
 }
 
+type MUCHistory struct {
+	ID        int64
+	RoomJID   JID
+	SenderJID JID
+	TS        time.Time
+	StanzaID  string
+	StanzaXML []byte
+}
+
+type MUCArchivedStanza struct {
+	ID            int64
+	RoomJID       JID
+	SenderBareJID JID
+	TS            time.Time
+	StanzaID      string
+	OriginID      string
+	StanzaXML     []byte
+}
+
 type MUCAffiliation struct {
 	RoomJID     JID
 	UserJID     JID
@@ -103,6 +122,15 @@ type MAMStore interface {
 	Append(ctx context.Context, msg *ArchivedStanza) (int64, error)
 	Query(ctx context.Context, owner string, with *JID, before, after *time.Time, limit int) ([]*ArchivedStanza, error)
 	Prune(ctx context.Context, owner string, olderThan time.Time) (int, error)
+	AppendMUC(ctx context.Context, m *MUCArchivedStanza) (int64, error)
+	QueryMUC(ctx context.Context, roomJID JID, with *JID, before, after *time.Time, limit int) ([]*MUCArchivedStanza, error)
+	PruneMUC(ctx context.Context, roomJID JID, olderThan time.Time) (int, error)
+}
+
+type PEPSubscription struct {
+	Owner      string
+	Node       string
+	Subscriber string
 }
 
 type PEPStore interface {
@@ -113,6 +141,16 @@ type PEPStore interface {
 	GetItem(ctx context.Context, owner, node, itemID string) (*PEPItem, error)
 	ListItems(ctx context.Context, owner, node string, limit int) ([]*PEPItem, error)
 	DeleteItem(ctx context.Context, owner, node, itemID string) error
+	// Subscription management: used for per-room pubsub hosts and last-item replay.
+	PutSubscription(ctx context.Context, sub *PEPSubscription) error
+	DeleteSubscription(ctx context.Context, owner, node, subscriber string) error
+	// DeleteSubscriptionsForSubscriber removes all subscriptions for a given subscriber
+	// under a specific owner (e.g. drop all room-node subs when user is evicted).
+	DeleteSubscriptionsForSubscriber(ctx context.Context, owner, subscriber string) error
+	ListSubscribers(ctx context.Context, owner, node string) ([]string, error)
+	// DeleteNodesForOwner removes every node and its items for the given owner.
+	// Used to clean up per-room pubsub state when a MUC room is destroyed.
+	DeleteNodesForOwner(ctx context.Context, owner string) error
 }
 
 type MUCStore interface {
@@ -122,6 +160,11 @@ type MUCStore interface {
 	PutAffiliation(ctx context.Context, a *MUCAffiliation) error
 	ListAffiliations(ctx context.Context, roomJID JID) ([]*MUCAffiliation, error)
 	ListRooms(ctx context.Context) ([]*MUCRoom, error)
+	PutRoomSubject(ctx context.Context, roomJID JID, subject, byNick string, ts time.Time) error
+	GetRoomSubject(ctx context.Context, roomJID JID) (subject, byNick string, ts time.Time, err error)
+	AppendHistory(ctx context.Context, h *MUCHistory) (int64, error)
+	QueryHistory(ctx context.Context, roomJID JID, before, after *time.Time, limit int) ([]*MUCHistory, error)
+	DeleteHistoryBefore(ctx context.Context, roomJID JID, ts time.Time) (int, error)
 }
 
 type PushStore interface {

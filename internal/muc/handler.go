@@ -185,6 +185,14 @@ func (s *Service) HandleIQ(ctx context.Context, iq *stanza.IQ) ([]byte, error) {
 		case stanza.IQGet:
 			return marshalResultIQ(iq, buildOwnerConfigForm(room)), nil
 		case stanza.IQSet:
+			// Detect <destroy/> before falling through to form-submit: the two
+			// are mutually exclusive child elements of <query xmlns='muc#owner'>.
+			if d, isDestroy := parseMUCOwnerDestroy(iq.Payload); isDestroy {
+				if err := s.destroyRoom(ctx, room, d.AltJID, d.Reason); err != nil {
+					return errToIQ(iq, err), nil
+				}
+				return marshalResultIQ(iq, nil), nil
+			}
 			form, ok := parseMUCOwnerSubmit(iq.Payload)
 			if !ok || form == nil {
 				return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
@@ -200,6 +208,77 @@ func (s *Service) HandleIQ(ctx context.Context, iq *stanza.IQ) ([]byte, error) {
 		default:
 			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrFeatureNotImplemented), nil
 		}
+	}
+
+	if to.Local != "" && to.Resource == "" && isMUCAdminIQ(iq.Payload) {
+		from, ferr := stanza.Parse(iq.From)
+		if ferr != nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
+		}
+		room := s.getRoom(to)
+		if room == nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrItemNotFound), nil
+		}
+
+		items, ok := parseMUCAdminItems(iq.Payload)
+		if !ok {
+			return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
+		}
+
+		switch iq.Type {
+		case stanza.IQGet:
+			return marshalResultIQ(iq, buildAdminItemsResponse(room, items)), nil
+		case stanza.IQSet:
+			if err := room.ApplyAdminItems(ctx, from, items, s.router); err != nil {
+				return errToIQ(iq, err), nil
+			}
+			return marshalResultIQ(iq, nil), nil
+		default:
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrFeatureNotImplemented), nil
+		}
+	}
+
+	// Pubsub IQs targeted at a room bare JID: delegate to the per-room
+	// pubsub host which enforces MUC-affiliation-based ACLs.
+	if to.Local != "" && to.Resource == "" &&
+		(firstChildNS(iq.Payload) == nsPubSub || firstChildNS(iq.Payload) == nsPubSubOwner) {
+		if s.pubsubHost == nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrFeatureNotImplemented), nil
+		}
+		room := s.getRoom(to)
+		if room == nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrItemNotFound), nil
+		}
+		from, ferr := stanza.Parse(iq.From)
+		if ferr != nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
+		}
+		// For the X3DHPQ group membership journal, enforce per-node item-size
+		// and item-count caps before the publish reaches the store.
+		if iq.Type == stanza.IQSet && pubsubPublishTargetsNode(iq.Payload, nsGroup) {
+			if err := enforceGroupNodePublish(ctx, to, iq.Payload, s.pubsubHost.Store()); err != nil {
+				return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrNotAcceptable), nil
+			}
+		}
+		return s.pubsubHost.HandleIQ(ctx, to, from, iq)
+	}
+
+	// MAM query directed at a room bare JID (XEP-0313 §4.2).
+	if iq.Type == stanza.IQSet && to.Local != "" && to.Resource == "" && isMAMQueryIQ(iq.Payload) {
+		if s.mam == nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrFeatureNotImplemented), nil
+		}
+		from, ferr := stanza.Parse(iq.From)
+		if ferr != nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
+		}
+		if !s.CanQueryMAM(to, from.Bare().String()) {
+			return marshalErrorIQ(iq, stanza.ErrorTypeAuth, stanza.ErrForbidden), nil
+		}
+		deliver := func(raw []byte) error {
+			return s.router.RouteToFull(ctx, from, raw)
+		}
+		return s.mam.HandleMUCIQ(ctx, iq, to, from, deliver)
 	}
 
 	if iq.Type == stanza.IQGet && to.Resource != "" && isSelfPingIQ(iq.Payload) {
@@ -218,4 +297,41 @@ func (s *Service) HandleIQ(ctx context.Context, iq *stanza.IQ) ([]byte, error) {
 	}
 
 	return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrFeatureNotImplemented), nil
+}
+
+// buildAdminItemsResponse builds a <query xmlns='muc#admin'> response with
+// affiliation-list items matching the requested affiliation levels.
+func buildAdminItemsResponse(room *Room, requestedItems []AdminItem) []byte {
+	var collected []AdminItem
+	for _, req := range requestedItems {
+		if req.Affiliation == "" {
+			continue
+		}
+		level := parseAffiliationName(req.Affiliation)
+		collected = append(collected, room.AdminItems(level)...)
+	}
+
+	var b bytes.Buffer
+	b.WriteString(`<query xmlns='http://jabber.org/protocol/muc#admin'>`)
+	for _, it := range collected {
+		b.WriteString(`<item affiliation='` + xmlAttrEscape(it.Affiliation) + `'`)
+		if it.JID != "" {
+			b.WriteString(` jid='` + xmlAttrEscape(it.JID) + `'`)
+		}
+		if it.Nick != "" {
+			b.WriteString(` nick='` + xmlAttrEscape(it.Nick) + `'`)
+		}
+		b.WriteString(`/>`)
+	}
+	b.WriteString(`</query>`)
+	return b.Bytes()
+}
+
+// errToIQ converts an error (typically *stanza.StanzaError) into a marshalled
+// error IQ. Falls back to internal-server-error for unknown error types.
+func errToIQ(iq *stanza.IQ, err error) []byte {
+	if se, ok := err.(*stanza.StanzaError); ok {
+		return marshalErrorIQ(iq, se.Type, se.Condition)
+	}
+	return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrInternalServerError)
 }

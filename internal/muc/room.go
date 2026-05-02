@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danielinux/xmppqr/internal/mam"
 	"github.com/danielinux/xmppqr/internal/router"
 	"github.com/danielinux/xmppqr/internal/stanza"
 	"github.com/danielinux/xmppqr/internal/storage"
@@ -70,21 +71,27 @@ type Room struct {
 	affiliations     map[string]int
 	subject          string
 	subjectChangedBy string
+	subjectTS        time.Time
 	history          []*ArchivedMessage
 	persistent       bool
+	store            storage.MUCStore
+	// mam is optional; when set, BroadcastMessage archives into MAM.
+	mam              *mam.Service
 }
 
-func newRoom(j stanza.JID, cfg RoomConfig, persistent bool) *Room {
+func newRoom(j stanza.JID, cfg RoomConfig, persistent bool, store storage.MUCStore, mamSvc *mam.Service) *Room {
 	return &Room{
 		jid:          j,
 		config:       cfg,
 		occupants:    make(map[string]*Occupant),
 		affiliations: make(map[string]int),
 		persistent:   persistent,
+		store:        store,
+		mam:          mamSvc,
 	}
 }
 
-func roomFromStorage(r *storage.MUCRoom) (*Room, error) {
+func roomFromStorage(r *storage.MUCRoom, store storage.MUCStore, mamSvc *mam.Service) (*Room, error) {
 	j, err := stanza.Parse(r.JID)
 	if err != nil {
 		return nil, err
@@ -95,7 +102,7 @@ func roomFromStorage(r *storage.MUCRoom) (*Room, error) {
 			return nil, err2
 		}
 	}
-	room := newRoom(j, cfg, r.Persistent)
+	room := newRoom(j, cfg, r.Persistent, store, mamSvc)
 	return room, nil
 }
 
@@ -116,9 +123,17 @@ func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *ro
 	}
 	occ.Affiliation = aff
 
+	// Outcasts are banned regardless of members-only setting (XEP-0045 §10.2).
+	if aff == AffOutcast {
+		return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+	}
+
 	if r.config.MembersOnly && aff < AffMember {
 		return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
 	}
+
+	// Preload stored history when the room has no in-memory history yet.
+	r.preloadFromStoreIfEmpty(ctx)
 
 	if existing, clash := r.occupants[occ.Nick]; clash {
 		if !existing.FullJID.Equal(occ.FullJID) {
@@ -244,18 +259,45 @@ func (r *Room) BroadcastMessage(ctx context.Context, fromFullJID stanza.JID, raw
 		return err
 	}
 
-	if r.config.HistoryMax != 0 || true {
-		r.history = append(r.history, &ArchivedMessage{
-			TS:       time.Now(),
-			FromNick: sender.Nick,
-			XML:      rewritten,
-		})
-		max := r.config.HistoryMax
-		if max == 0 {
-			max = 100
+	msgTS := time.Now()
+	r.history = append(r.history, &ArchivedMessage{
+		TS:       msgTS,
+		FromNick: sender.Nick,
+		XML:      rewritten,
+	})
+	max := r.config.HistoryMax
+	if max == 0 {
+		max = 100
+	}
+	var oldestKeptTS time.Time
+	if len(r.history) > max*2 {
+		r.history = r.history[len(r.history)-max:]
+		oldestKeptTS = r.history[0].TS
+	}
+
+	if r.persistent && r.store != nil {
+		if _, err := r.store.AppendHistory(ctx, &storage.MUCHistory{
+			RoomJID:   r.jid.String(),
+			SenderJID: fromFullJID.String(),
+			TS:        msgTS,
+			StanzaXML: rewritten,
+		}); err != nil {
+			// Best-effort: warn but never block delivery.
+			_ = err
 		}
-		if len(r.history) > max*2 {
-			r.history = r.history[len(r.history)-max:]
+		// Trim stored history to match the in-memory cap.
+		if !oldestKeptTS.IsZero() {
+			if _, err := r.store.DeleteHistoryBefore(ctx, r.jid.String(), oldestKeptTS); err != nil {
+				_ = err
+			}
+		}
+	}
+
+	// Archive into MAM for XEP-0313 query support.  Best-effort: never
+	// block or fail the broadcast on archival errors.
+	if r.mam != nil {
+		if _, err := r.mam.ArchiveMUC(ctx, r.jid, fromFullJID, rewritten); err != nil {
+			_ = err
 		}
 	}
 
@@ -283,8 +325,17 @@ func (r *Room) ChangeSubject(ctx context.Context, fromNick string, newSubject st
 		return &stanza.StanzaError{Type: stanza.ErrorTypeCancel, Condition: stanza.ErrForbidden}
 	}
 
+	now := time.Now()
 	r.subject = newSubject
 	r.subjectChangedBy = fromNick
+	r.subjectTS = now
+
+	if r.persistent && r.store != nil {
+		if err := r.store.PutRoomSubject(ctx, r.jid.String(), newSubject, fromNick, now); err != nil {
+			// Best-effort: warn but do not fail the broadcast.
+			_ = err
+		}
+	}
 
 	fromNickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: fromNick}
 	for _, o := range r.occupants {
@@ -295,6 +346,12 @@ func (r *Room) ChangeSubject(ctx context.Context, fromNick string, newSubject st
 }
 
 func (r *Room) SetAffiliation(ctx context.Context, byJID stanza.JID, targetJID stanza.JID, newAff int, store storage.MUCStore) error {
+	return r.setAffiliationFull(ctx, byJID, targetJID, newAff, "", store, nil)
+}
+
+// setAffiliationFull is the internal implementation that supports reason, actor,
+// and presence broadcasts. Caller must NOT hold r.mu.
+func (r *Room) setAffiliationFull(ctx context.Context, byJID stanza.JID, targetJID stanza.JID, newAff int, reason string, store storage.MUCStore, rtr *router.Router) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -307,21 +364,22 @@ func (r *Room) SetAffiliation(ctx context.Context, byJID stanza.JID, targetJID s
 	if byAff < AffAdmin {
 		return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
 	}
-	if byAff == AffAdmin && newAff > AffAdmin {
-		return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
-	}
-	if byAff == AffAdmin && newAff == AffOwner {
+	if byAff == AffAdmin && newAff >= AffAdmin {
 		return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
 	}
 
 	targetBare := targetJID.Bare().String()
-	r.affiliations[targetBare] = newAff
 
-	for nick, occ := range r.occupants {
-		if occ.FullJID.Bare().String() == targetBare {
-			r.occupants[nick].Affiliation = newAff
+	// Admins cannot modify other admins or owners.
+	if byAff == AffAdmin {
+		existing := r.affiliations[targetBare]
+		if existing >= AffAdmin {
+			return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
 		}
 	}
+
+	oldAff := r.affiliations[targetBare]
+	r.affiliations[targetBare] = newAff
 
 	if store != nil {
 		if err := store.PutAffiliation(ctx, &storage.MUCAffiliation{
@@ -332,7 +390,434 @@ func (r *Room) SetAffiliation(ctx context.Context, byJID stanza.JID, targetJID s
 			return err
 		}
 	}
+
+	if rtr == nil {
+		// Legacy path: just update in-memory occupant affiliation, no broadcasts.
+		for nick, occ := range r.occupants {
+			if occ.FullJID.Bare().String() == targetBare {
+				r.occupants[nick].Affiliation = newAff
+			}
+		}
+		return nil
+	}
+
+	// Determine status code and whether to evict.
+	var statusCode string
+	evict := false
+	if newAff == AffOutcast {
+		statusCode = "301"
+		evict = true
+	} else if newAff < AffMember && oldAff >= AffMember {
+		statusCode = "321"
+		evict = true
+	}
+
+	actorJIDStr := byJID.Bare().String()
+
+	// Collect affected occupants before mutating the map.
+	type affected struct {
+		nick string
+		occ  *Occupant
+	}
+	var targets []affected
+	for nick, occ := range r.occupants {
+		if occ.FullJID.Bare().String() == targetBare {
+			targets = append(targets, affected{nick, occ})
+		}
+	}
+
+	for _, t := range targets {
+		occ := t.occ
+		if evict {
+			delete(r.occupants, t.nick)
+		} else {
+			r.occupants[t.nick].Affiliation = newAff
+		}
+
+		presType := "available"
+		if evict {
+			presType = "unavailable"
+		}
+		xPayload := buildMUCUserXWithStatus(occ.Role, newAff, t.nick, reason, actorJIDStr, statusCode)
+		nickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: t.nick}
+
+		// Broadcast to all remaining occupants.
+		for _, other := range r.occupants {
+			pres := buildRawPresence(nickJID.String(), other.FullJID.String(), presType, xPayload)
+			_ = rtr.RouteToFull(ctx, other.FullJID, pres)
+		}
+		// Also send to the target occupant itself.
+		pres := buildRawPresence(nickJID.String(), occ.FullJID.String(), presType, xPayload)
+		_ = rtr.RouteToFull(ctx, occ.FullJID, pres)
+	}
+
+	if evict {
+		r.recomputeAIKMembers()
+		// Drop any pubsub subscriptions the evicted user held on this room's nodes.
+		if dropPubsubSubscriptions != nil {
+			go dropPubsubSubscriptions(ctx, r.jid, targetBare)
+		}
+	}
+
 	return nil
+}
+
+// SetRole updates an occupant's role for the current session (kick = RoleNone).
+// Broadcasts presence with status code 307 (kicked). Caller must be moderator.
+func (r *Room) SetRole(ctx context.Context, byJID stanza.JID, targetNick string, newRole int, reason string, rtr *router.Router) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Verify requester is a moderator.
+	byBare := byJID.Bare().String()
+	var byRole int
+	for _, occ := range r.occupants {
+		if occ.FullJID.Bare().String() == byBare {
+			byRole = occ.Role
+			break
+		}
+	}
+	if byRole < RoleModerator {
+		return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+	}
+
+	target, ok := r.occupants[targetNick]
+	if !ok {
+		return &stanza.StanzaError{Type: stanza.ErrorTypeCancel, Condition: stanza.ErrItemNotFound}
+	}
+
+	// Moderators cannot kick other moderators.
+	if target.Role >= RoleModerator {
+		aff := r.affiliations[byBare]
+		if aff < AffAdmin {
+			return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+		}
+	}
+
+	oldRole := target.Role
+	_ = oldRole
+
+	var statusCode string
+	evict := false
+	if newRole == RoleNone {
+		statusCode = "307"
+		evict = true
+		delete(r.occupants, targetNick)
+	} else {
+		r.occupants[targetNick].Role = newRole
+	}
+
+	actorJIDStr := byJID.Bare().String()
+	xPayload := buildMUCUserXWithStatus(newRole, target.Affiliation, targetNick, reason, actorJIDStr, statusCode)
+	nickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: targetNick}
+
+	presType := "available"
+	if evict {
+		presType = "unavailable"
+	}
+
+	for _, other := range r.occupants {
+		pres := buildRawPresence(nickJID.String(), other.FullJID.String(), presType, xPayload)
+		_ = rtr.RouteToFull(ctx, other.FullJID, pres)
+	}
+	// Send to target as well.
+	pres := buildRawPresence(nickJID.String(), target.FullJID.String(), presType, xPayload)
+	_ = rtr.RouteToFull(ctx, target.FullJID, pres)
+
+	if evict {
+		r.recomputeAIKMembers()
+	}
+
+	return nil
+}
+
+// AdminItems returns affiliation entries at or above the requested level.
+// Used to answer get-banlist / get-memberlist / get-adminlist / get-ownerlist.
+func (r *Room) AdminItems(level int) []AdminItem {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []AdminItem
+	for jidStr, aff := range r.affiliations {
+		if aff == level {
+			out = append(out, AdminItem{
+				Affiliation: affiliationName(aff),
+				JID:         jidStr,
+			})
+		}
+	}
+	return out
+}
+
+// ApplyAdminItems applies a slice of muc#admin item directives atomically.
+// Items containing both Affiliation and Role MUST NOT be mixed in one IQ
+// (XEP-0045 §9.5); this is enforced before any mutation.
+func (r *Room) ApplyAdminItems(ctx context.Context, byJID stanza.JID, items []AdminItem, rtr *router.Router) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	// Detect affiliation+role mixing before any mutation.
+	hasAff := false
+	hasRole := false
+	for _, it := range items {
+		if it.Affiliation != "" {
+			hasAff = true
+		}
+		if it.Role != "" {
+			hasRole = true
+		}
+	}
+	if hasAff && hasRole {
+		return &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrBadRequest}
+	}
+
+	if hasRole {
+		// Role-only items: apply via SetRole (each acquires the lock separately,
+		// but that's acceptable since role ops are per-session not stored state).
+		for _, it := range items {
+			if it.Nick == "" {
+				return &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrBadRequest}
+			}
+			newRole := parseRoleName(it.Role)
+			if err := r.SetRole(ctx, byJID, it.Nick, newRole, it.Reason, rtr); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Affiliation items: validate all, then apply atomically under one lock.
+	type work struct {
+		targetJID stanza.JID
+		newAff    int
+		reason    string
+	}
+	ops := make([]work, 0, len(items))
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	byBare := byJID.Bare().String()
+	byAff := r.affiliations[byBare]
+
+	for _, it := range items {
+		if it.Affiliation == "" {
+			return &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrBadRequest}
+		}
+		newAff := parseAffiliationName(it.Affiliation)
+
+		// Real-JID required for outcast and all affiliation changes.
+		if it.JID == "" {
+			if newAff == AffOutcast {
+				// Nick-only ban rejected per locked design decision.
+				return &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrNotAcceptable}
+			}
+			// Other affiliation changes also require real JID.
+			return &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrBadRequest}
+		}
+
+		tj, err := stanza.Parse(it.JID)
+		if err != nil {
+			return &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrBadRequest}
+		}
+		targetBare := tj.Bare().String()
+
+		// Auth checks.
+		if byAff < AffAdmin {
+			return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+		}
+		if byAff == AffAdmin {
+			if newAff >= AffAdmin {
+				return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+			}
+			existing := r.affiliations[targetBare]
+			if existing >= AffAdmin {
+				return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+			}
+		}
+
+		ops = append(ops, work{tj, newAff, it.Reason})
+	}
+
+	// All validations passed — apply mutations.
+	actorJIDStr := byJID.Bare().String()
+
+	// Apply outcasts first so evictions happen before promotions.
+	for _, op := range ops {
+		if op.newAff == AffOutcast {
+			r.applyAffiliationLocked(ctx, op.targetJID, op.newAff, op.reason, actorJIDStr, rtr)
+		}
+	}
+	for _, op := range ops {
+		if op.newAff != AffOutcast {
+			r.applyAffiliationLocked(ctx, op.targetJID, op.newAff, op.reason, actorJIDStr, rtr)
+		}
+	}
+
+	// Persist all changes.
+	if r.store != nil {
+		for _, op := range ops {
+			targetBare := op.targetJID.Bare().String()
+			_ = r.store.PutAffiliation(ctx, &storage.MUCAffiliation{
+				RoomJID:     r.jid.String(),
+				UserJID:     targetBare,
+				Affiliation: op.newAff,
+			})
+		}
+	}
+
+	return nil
+}
+
+// dropPubsubSubscriptions is set by the MUC Service when a pubsub host is
+// wired in.  It is called after affiliation-based eviction to remove the
+// evicted user's pubsub subscriptions on this room's nodes.
+var dropPubsubSubscriptions func(ctx context.Context, roomJID stanza.JID, subscriberBare string)
+
+// applyAffiliationLocked applies one affiliation change and broadcasts presence.
+// Caller must hold r.mu.Lock(). Does NOT persist — caller persists after all ops.
+func (r *Room) applyAffiliationLocked(ctx context.Context, targetJID stanza.JID, newAff int, reason, actorJIDStr string, rtr *router.Router) {
+	targetBare := targetJID.Bare().String()
+	oldAff := r.affiliations[targetBare]
+	r.affiliations[targetBare] = newAff
+
+	var statusCode string
+	evict := false
+	if newAff == AffOutcast {
+		statusCode = "301"
+		evict = true
+	} else if newAff < AffMember && oldAff >= AffMember {
+		statusCode = "321"
+		evict = true
+	}
+
+	if rtr == nil {
+		if !evict {
+			for nick, occ := range r.occupants {
+				if occ.FullJID.Bare().String() == targetBare {
+					r.occupants[nick].Affiliation = newAff
+				}
+			}
+		}
+		return
+	}
+
+	type affected struct {
+		nick string
+		occ  *Occupant
+	}
+	var targets []affected
+	for nick, occ := range r.occupants {
+		if occ.FullJID.Bare().String() == targetBare {
+			targets = append(targets, affected{nick, occ})
+		}
+	}
+
+	for _, t := range targets {
+		occ := t.occ
+		if evict {
+			delete(r.occupants, t.nick)
+		} else {
+			r.occupants[t.nick].Affiliation = newAff
+		}
+
+		presType := "available"
+		if evict {
+			presType = "unavailable"
+		}
+		xPayload := buildMUCUserXWithStatus(occ.Role, newAff, t.nick, reason, actorJIDStr, statusCode)
+		nickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: t.nick}
+
+		for _, other := range r.occupants {
+			pres := buildRawPresence(nickJID.String(), other.FullJID.String(), presType, xPayload)
+			_ = rtr.RouteToFull(ctx, other.FullJID, pres)
+		}
+		pres := buildRawPresence(nickJID.String(), occ.FullJID.String(), presType, xPayload)
+		_ = rtr.RouteToFull(ctx, occ.FullJID, pres)
+	}
+
+	if evict {
+		r.recomputeAIKMembers()
+		// Drop any pubsub subscriptions the evicted user held on this room's nodes.
+		if dropPubsubSubscriptions != nil {
+			targetBare := targetJID.Bare().String()
+			go dropPubsubSubscriptions(ctx, r.jid, targetBare)
+		}
+	}
+}
+
+// Destroy evicts every occupant with a tombstone presence and clears
+// affiliations. The caller is responsible for removing the room from
+// the Service map and deleting the row from MUCStore.
+//
+// Tombstone presence per XEP-0045 §10.9:
+//
+//	<presence from='room@conference/nick' to='occupant' type='unavailable'>
+//	  <x xmlns='http://jabber.org/protocol/muc#user'>
+//	    <item affiliation='none' role='none'/>
+//	    <destroy jid='alt-jid'><reason>...</reason></destroy>
+//	  </x>
+//	</presence>
+func (r *Room) Destroy(ctx context.Context, altJID, reason string, rtr *router.Router) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Build the <x> payload once; it is identical for every recipient.
+	xPayload := buildDestroyX(altJID, reason)
+
+	// Emit tombstone to every occupant BEFORE clearing the map so they all
+	// receive their notification.
+	for nick, occ := range r.occupants {
+		nickJID := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: nick}
+		pres := buildRawPresence(nickJID.String(), occ.FullJID.String(), stanza.PresenceUnavailable, xPayload)
+		_ = rtr.RouteToFull(ctx, occ.FullJID, pres)
+	}
+
+	// Clear in-memory state.
+	r.occupants = make(map[string]*Occupant)
+	r.affiliations = make(map[string]int)
+
+	// Best-effort: remove history rows so storage stays tidy.
+	if r.persistent && r.store != nil {
+		_, _ = r.store.DeleteHistoryBefore(ctx, r.jid.String(), time.Now())
+	}
+}
+
+// buildDestroyX builds the <x xmlns='muc#user'> payload for a destroy tombstone.
+func buildDestroyX(altJID, reason string) []byte {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+
+	x := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "x"}}
+	enc.EncodeToken(x)
+
+	item := xml.StartElement{
+		Name: xml.Name{Space: nsMUCUser, Local: "item"},
+		Attr: []xml.Attr{
+			{Name: xml.Name{Local: "affiliation"}, Value: "none"},
+			{Name: xml.Name{Local: "role"}, Value: "none"},
+		},
+	}
+	enc.EncodeToken(item)
+	enc.EncodeToken(item.End())
+
+	destroyAttrs := []xml.Attr{}
+	if altJID != "" {
+		destroyAttrs = append(destroyAttrs, xml.Attr{Name: xml.Name{Local: "jid"}, Value: altJID})
+	}
+	destroy := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "destroy"}, Attr: destroyAttrs}
+	enc.EncodeToken(destroy)
+	if reason != "" {
+		reasonEl := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "reason"}}
+		enc.EncodeToken(reasonEl)
+		enc.EncodeToken(xml.CharData(reason))
+		enc.EncodeToken(reasonEl.End())
+	}
+	enc.EncodeToken(destroy.End())
+
+	enc.EncodeToken(x.End())
+	enc.Flush()
+	return buf.Bytes()
 }
 
 func (r *Room) SelfPing(ctx context.Context, fromFullJID stanza.JID, rtr *router.Router) error {
@@ -458,6 +943,34 @@ func (r *Room) AIKMembers() []string {
 	out := make([]string, len(r.config.AIKMembers))
 	copy(out, r.config.AIKMembers)
 	return out
+}
+
+// preloadFromStoreIfEmpty loads history from storage when the room has no
+// in-memory history yet (e.g. after a service restart). Caller must hold r.mu.
+func (r *Room) preloadFromStoreIfEmpty(ctx context.Context) {
+	if len(r.history) > 0 || !r.persistent || r.store == nil {
+		return
+	}
+	limit := r.config.HistoryMax
+	if limit == 0 {
+		limit = 20
+	}
+	rows, err := r.store.QueryHistory(ctx, r.jid.String(), nil, nil, limit)
+	if err != nil {
+		return
+	}
+	for _, h := range rows {
+		// Derive FromNick from SenderJID resource (stored as room@conf/nick).
+		nick := ""
+		if sj, perr := stanza.Parse(h.SenderJID); perr == nil {
+			nick = sj.Resource
+		}
+		r.history = append(r.history, &ArchivedMessage{
+			TS:       h.TS,
+			FromNick: nick,
+			XML:      h.StanzaXML,
+		})
+	}
 }
 
 func buildOccupantPresence(from, to string, role, affiliation int, unavailable bool, aikFP string) []byte {
@@ -801,6 +1314,112 @@ func roleName(r int) string {
 		return "visitor"
 	default:
 		return "none"
+	}
+}
+
+// buildMUCUserXWithStatus builds the <x xmlns='muc#user'> payload for kick/ban/role-change
+// presence stanzas, including optional reason, actor, and status code.
+func buildMUCUserXWithStatus(role, affiliation int, nick, reason, actorJID, statusCode string) []byte {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+
+	x := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "x"}}
+	enc.EncodeToken(x)
+
+	item := xml.StartElement{
+		Name: xml.Name{Space: nsMUCUser, Local: "item"},
+		Attr: []xml.Attr{
+			{Name: xml.Name{Local: "affiliation"}, Value: affiliationName(affiliation)},
+			{Name: xml.Name{Local: "role"}, Value: roleName(role)},
+		},
+	}
+	if nick != "" {
+		item.Attr = append(item.Attr, xml.Attr{Name: xml.Name{Local: "nick"}, Value: nick})
+	}
+	enc.EncodeToken(item)
+
+	if reason != "" {
+		reasonEl := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "reason"}}
+		enc.EncodeToken(reasonEl)
+		enc.EncodeToken(xml.CharData(reason))
+		enc.EncodeToken(reasonEl.End())
+	}
+	if actorJID != "" {
+		actorEl := xml.StartElement{
+			Name: xml.Name{Space: nsMUCUser, Local: "actor"},
+			Attr: []xml.Attr{{Name: xml.Name{Local: "jid"}, Value: actorJID}},
+		}
+		enc.EncodeToken(actorEl)
+		enc.EncodeToken(actorEl.End())
+	}
+
+	enc.EncodeToken(item.End())
+
+	if statusCode != "" {
+		status := xml.StartElement{
+			Name: xml.Name{Space: nsMUCUser, Local: "status"},
+			Attr: []xml.Attr{{Name: xml.Name{Local: "code"}, Value: statusCode}},
+		}
+		enc.EncodeToken(status)
+		enc.EncodeToken(status.End())
+	}
+
+	enc.EncodeToken(x.End())
+	enc.Flush()
+	return buf.Bytes()
+}
+
+// buildRawPresence builds a <presence> stanza with the given from/to/type and XML payload.
+func buildRawPresence(from, to, presType string, payload []byte) []byte {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+
+	start := xml.StartElement{
+		Name: xml.Name{Local: "presence"},
+		Attr: []xml.Attr{
+			{Name: xml.Name{Local: "from"}, Value: from},
+			{Name: xml.Name{Local: "to"}, Value: to},
+		},
+	}
+	if presType != "" && presType != "available" {
+		start.Attr = append(start.Attr, xml.Attr{Name: xml.Name{Local: "type"}, Value: presType})
+	}
+	enc.EncodeToken(start)
+	enc.Flush()
+
+	buf.Write(payload)
+
+	enc2 := xml.NewEncoder(&buf)
+	enc2.EncodeToken(start.End())
+	enc2.Flush()
+	return buf.Bytes()
+}
+
+func parseAffiliationName(s string) int {
+	switch s {
+	case "owner":
+		return AffOwner
+	case "admin":
+		return AffAdmin
+	case "member":
+		return AffMember
+	case "outcast":
+		return AffOutcast
+	default:
+		return AffNone
+	}
+}
+
+func parseRoleName(s string) int {
+	switch s {
+	case "moderator":
+		return RoleModerator
+	case "participant":
+		return RoleParticipant
+	case "visitor":
+		return RoleVisitor
+	default:
+		return RoleNone
 	}
 }
 

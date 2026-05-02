@@ -8,9 +8,41 @@ import (
 	"github.com/danielinux/xmppqr/internal/stanza"
 )
 
-const nsPubSubEvent = "http://jabber.org/protocol/pubsub#event"
+// replayLastItem delivers the most recent item of (owner, node) to subscriber
+// as a <message><event/> notification.  Called immediately after a new
+// subscription is recorded so the subscriber does not miss existing content
+// (XEP-0163 §6.6).
+func (svc *Service) replayLastItem(ctx context.Context, owner stanza.JID, node string, subscriber stanza.JID) {
+	items, err := svc.store.ListItems(ctx, owner.Bare().String(), node, 1)
+	if err != nil || len(items) == 0 {
+		return
+	}
+	it := items[0]
+	go svc.notifySingleSubscriber(ctx, owner, node, it.ItemID, it.Payload, subscriber)
+}
 
-func (svc *Service) notify(ctx context.Context, owner stanza.JID, node, itemID string, payload []byte) {
+// notifySingleSubscriber sends one pubsub#event message to a single full JID.
+func (svc *Service) notifySingleSubscriber(ctx context.Context, owner stanza.JID, node, itemID string, payload []byte, subscriber stanza.JID) {
+	eventBytes := buildEventPayload(node, itemID, payload)
+
+	msg := &stanza.Message{
+		From:     owner.String(),
+		To:       subscriber.String(),
+		Type:     stanza.MessageHeadline,
+		Children: eventBytes,
+	}
+	raw, err := msg.Marshal()
+	if err != nil {
+		svc.logger.Error("pubsub replay marshal", "err", err)
+		return
+	}
+	if err := svc.router.RouteToFull(ctx, subscriber, raw); err != nil {
+		svc.logger.Debug("pubsub replay route", "subscriber", subscriber, "err", err)
+	}
+}
+
+// buildEventPayload encodes the pubsub#event wrapper for a single item.
+func buildEventPayload(node, itemID string, payload []byte) []byte {
 	var buf bytes.Buffer
 	enc := xml.NewEncoder(&buf)
 
@@ -35,12 +67,19 @@ func (svc *Service) notify(ctx context.Context, owner stanza.JID, node, itemID s
 	enc.EncodeToken(itemsEl.End())
 	enc.EncodeToken(eventEl.End())
 	enc.Flush()
+	return buf.Bytes()
+}
+
+const nsPubSubEvent = "http://jabber.org/protocol/pubsub#event"
+
+func (svc *Service) notify(ctx context.Context, owner stanza.JID, node, itemID string, payload []byte) {
+	eventBytes := buildEventPayload(node, itemID, payload)
 
 	msg := &stanza.Message{
 		From:     owner.String(),
 		To:       owner.Bare().String(),
 		Type:     stanza.MessageHeadline,
-		Children: buf.Bytes(),
+		Children: eventBytes,
 	}
 	raw, err := msg.Marshal()
 	if err != nil {
@@ -76,7 +115,7 @@ func (svc *Service) notify(ctx context.Context, owner stanza.JID, node, itemID s
 				From:     owner.String(),
 				To:       fullJID.String(),
 				Type:     stanza.MessageHeadline,
-				Children: buf.Bytes(),
+				Children: eventBytes,
 			}
 			contactRaw, merr := contactMsg.Marshal()
 			if merr != nil {

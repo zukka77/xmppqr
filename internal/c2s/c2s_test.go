@@ -1324,7 +1324,7 @@ func TestMUCJoinConflictReturnsPresenceError(t *testing.T) {
 	ctx := context.Background()
 	stores := memstore.New()
 	r := router.New()
-	mucSvc := muc.New("example.com", "conference", stores.MUC, r, slog.Default())
+	mucSvc := muc.New("example.com", "conference", stores.MUC, nil, nil, r, slog.Default())
 	aliceJID, err := stanza.Parse("alice@example.com/phone")
 	if err != nil {
 		t.Fatalf("parse alice jid: %v", err)

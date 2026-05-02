@@ -9,9 +9,11 @@ import (
 )
 
 type mamStore struct {
-	mu       sync.RWMutex
-	seq      int64
-	messages []*storage.ArchivedStanza
+	mu         sync.RWMutex
+	seq        int64
+	messages   []*storage.ArchivedStanza
+	mucSeq     int64
+	mucArchive []*storage.MUCArchivedStanza
 }
 
 func newMAMStore() *mamStore {
@@ -67,5 +69,57 @@ func (s *mamStore) Prune(_ context.Context, owner string, olderThan time.Time) (
 		}
 	}
 	s.messages = kept
+	return removed, nil
+}
+
+func (s *mamStore) AppendMUC(_ context.Context, m *storage.MUCArchivedStanza) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mucSeq++
+	cp := *m
+	cp.ID = s.mucSeq
+	s.mucArchive = append(s.mucArchive, &cp)
+	return cp.ID, nil
+}
+
+func (s *mamStore) QueryMUC(_ context.Context, roomJID storage.JID, with *storage.JID, before, after *time.Time, limit int) ([]*storage.MUCArchivedStanza, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*storage.MUCArchivedStanza
+	for _, m := range s.mucArchive {
+		if m.RoomJID != roomJID {
+			continue
+		}
+		if with != nil && m.SenderBareJID != *with {
+			continue
+		}
+		if after != nil && !m.TS.After(*after) {
+			continue
+		}
+		if before != nil && !m.TS.Before(*before) {
+			continue
+		}
+		cp := *m
+		out = append(out, &cp)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *mamStore) PruneMUC(_ context.Context, roomJID storage.JID, olderThan time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.mucArchive[:0]
+	removed := 0
+	for _, m := range s.mucArchive {
+		if m.RoomJID == roomJID && m.TS.Before(olderThan) {
+			removed++
+		} else {
+			kept = append(kept, m)
+		}
+	}
+	s.mucArchive = kept
 	return removed, nil
 }

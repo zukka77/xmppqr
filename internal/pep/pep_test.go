@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielinux/xmppqr/internal/caps"
 	"github.com/danielinux/xmppqr/internal/pubsub"
 	"github.com/danielinux/xmppqr/internal/router"
 	"github.com/danielinux/xmppqr/internal/stanza"
+	"github.com/danielinux/xmppqr/internal/storage"
 	"github.com/danielinux/xmppqr/internal/storage/memstore"
 )
 
@@ -240,4 +242,124 @@ func TestPEPGetAllowsContactFetch(t *testing.T) {
 	if !bytes.Contains(raw, []byte("bundle1")) {
 		t.Fatalf("expected contact bundle in response, got: %s", raw)
 	}
+}
+
+// TestPEPAuditNodePersistAcrossRestart verifies that an audit node published
+// through one PEP service instance is visible when a new PEP service is
+// instantiated over the same store (simulating a server restart).
+func TestPEPAuditNodePersistAcrossRestart(t *testing.T) {
+	stores := memstore.New()
+	r := router.New()
+	logger := slog.Default()
+
+	aliceJID, _ := stanza.Parse("alice@example.com/work")
+	sess := &mockSession{jid: aliceJID}
+	r.Register(sess)
+
+	// First service instance — publish an audit entry.
+	ps1 := pubsub.New(stores.PEP, r, logger, 0)
+	svc1 := New(ps1, logger)
+
+	node := "urn:xmppqr:x3dhpq:audit:0"
+	iq := buildPEPPublishIQ(node, "audit-entry-1", []byte("<audit-entry xmlns='urn:xmppqr:x3dhpq:audit:0'/>"))
+	if _, err := svc1.HandleIQ(context.Background(), aliceJID, iq); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+
+	// Second service instance over the same store — simulates restart.
+	ps2 := pubsub.New(stores.PEP, r, logger, 0)
+	svc2 := New(ps2, logger)
+
+	fetchIQ := buildPEPFetchIQ(node)
+	raw, err := svc2.HandleIQ(context.Background(), aliceJID, fetchIQ)
+	if err != nil {
+		t.Fatalf("fetch after restart: %v", err)
+	}
+	if !bytes.Contains(raw, []byte("audit-entry-1")) {
+		t.Errorf("audit item not found after restart, got: %s", raw)
+	}
+}
+
+// TestPEPDevicelistNotifyDeliversToSubscribers verifies that publishing to
+// the devicelist PEP node triggers a +notify delivery to a subscribed contact
+// whose caps advertise the corresponding +notify feature.
+func TestPEPDevicelistNotifyDeliversToSubscribers(t *testing.T) {
+	stores := memstore.New()
+	r := router.New()
+	logger := slog.Default()
+
+	aliceJID, _ := stanza.Parse("alice@example.com/work")
+	aliceSess := &mockSession{jid: aliceJID}
+	r.Register(aliceSess)
+
+	bobJID, _ := stanza.Parse("bob@example.com/phone")
+	bobSess := &mockSession{jid: bobJID}
+	r.Register(bobSess)
+
+	ps := pubsub.New(stores.PEP, r, logger, 0)
+
+	// Wire up contact notify: alice has bob on her roster (subscription=3 both).
+	rosterStore := &staticRoster{items: []*storage.RosterItem{
+		{Owner: "alice@example.com", Contact: "bob@example.com", Subscription: 3},
+	}}
+	capsCache := caps.New()
+	// Bob advertises the devicelist +notify feature.
+	capsCache.PutFeatures(bobJID, "n", "v", []string{"urn:xmppqr:x3dhpq:devicelist:0+notify"})
+	ps.WithContactNotify(rosterStore, capsCache)
+
+	svc := New(ps, logger)
+
+	node := "urn:xmppqr:x3dhpq:devicelist:0"
+	iq := buildPEPPublishIQ(node, "device-1", []byte("<devicelist xmlns='urn:xmppqr:x3dhpq:devicelist:0'/>"))
+	if _, err := svc.HandleIQ(context.Background(), aliceJID, iq); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// Notify is asynchronous; wait briefly.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(bobSess.deliveries()) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if len(bobSess.deliveries()) == 0 {
+		t.Fatal("bob should have received a +notify event for the devicelist node")
+	}
+	if !bytes.Contains(bobSess.deliveries()[0], []byte("urn:xmppqr:x3dhpq:devicelist:0")) {
+		t.Errorf("notify missing node name: %s", bobSess.deliveries()[0])
+	}
+}
+
+// buildPEPFetchIQ builds a <items> IQ to fetch all items of a PEP node.
+func buildPEPFetchIQ(node string) *stanza.IQ {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	psEl := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/pubsub", Local: "pubsub"}}
+	itemsEl := xml.StartElement{
+		Name: xml.Name{Local: "items"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "node"}, Value: node}},
+	}
+	enc.EncodeToken(psEl)
+	enc.EncodeToken(itemsEl)
+	enc.EncodeToken(itemsEl.End())
+	enc.EncodeToken(psEl.End())
+	enc.Flush()
+	return &stanza.IQ{
+		ID:      "fetch-audit",
+		From:    "alice@example.com/work",
+		To:      "alice@example.com",
+		Type:    stanza.IQGet,
+		Payload: buf.Bytes(),
+	}
+}
+
+// staticRoster is a minimal rosterGetter stub for tests.
+type staticRoster struct {
+	items []*storage.RosterItem
+}
+
+func (s *staticRoster) Get(_ context.Context, _ string) ([]*storage.RosterItem, int64, error) {
+	return s.items, 0, nil
 }

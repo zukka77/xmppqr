@@ -310,6 +310,7 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 	ps.WithContactNotify(rosterMgr, capsCache)
 
 	carbMgr := carbons.New(rt, slog.Default())
+	mamSvc := mam.New(stores.MAM, slog.Default())
 	mods := &c2s.Modules{
 		Disco:      disco.DefaultServer(),
 		Roster:     rosterMgr,
@@ -317,13 +318,13 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 		VCard:      vcard.New(stores.PEP),
 		Bookmarks:  bookmarks.New(stores.PEP),
 		Block:      block.New(stores.Block),
-		MAM:        mam.New(stores.MAM, slog.Default()),
+		MAM:        mamSvc,
 		Carbons:    carbMgr,
 		Push:       pushDisp,
 		HTTPUpload: uploadSvcFull,
 		PubSub:     ps,
 		PEP:        pep.New(ps, slog.Default()),
-		MUC:        muc.New(domain, "conference", stores.MUC, rt, slog.Default()),
+		MUC:        muc.New(domain, "conference", stores.MUC, mamSvc, ps, rt, slog.Default()),
 		Metrics:    metrics.New(prometheus.NewRegistry()),
 		X3DHPQPolicy: x3dhpq.DomainPolicy{X3DHPQOnlyMode: false},
 		Caps:       capsCache,

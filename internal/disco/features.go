@@ -45,6 +45,8 @@ func DefaultServer() *Features {
 			"urn:xmppqr:x3dhpq:0",
 			"urn:xmppqr:x3dhpq:devicelist:0+notify",
 			"urn:xmppqr:x3dhpq:audit:0+notify",
+			"urn:xmppqr:x3dhpq:recovery:0+notify",
+			"urn:xmppqr:x3dhpq:group:0+notify",
 			"urn:ietf:params:xml:ns:xmpp-session",
 			"jabber:iq:version",
 			"jabber:iq:last",
