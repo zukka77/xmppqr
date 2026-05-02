@@ -79,14 +79,14 @@ func (s *Service) handlePresence(ctx context.Context, raw []byte, from stanza.JI
 		}
 	}
 
-	room := s.getOrCreateRoom(ctx, to, from)
+	room, created := s.getOrCreateRoom(ctx, to, from)
 
 	occ := &Occupant{
 		Nick:           nick,
 		FullJID:        from,
 		AIKFingerprint: parseAIKExtension(raw),
 	}
-	return room.Join(ctx, occ, password, s.router, s.store)
+	return room.Join(ctx, occ, password, s.router, s.store, created)
 }
 
 func (s *Service) handleMessage(ctx context.Context, raw []byte, from stanza.JID, to stanza.JID) error {
@@ -146,6 +146,60 @@ func (s *Service) HandleIQ(ctx context.Context, iq *stanza.IQ) ([]byte, error) {
 			`<feature var='http://jabber.org/protocol/disco#items'/>` +
 			`</query>`)
 		return marshalResultIQ(iq, payload), nil
+	}
+
+	if iq.Type == stanza.IQGet && to.Local != "" && to.Resource == "" && isDiscoInfoIQ(iq.Payload) {
+		room := s.getRoom(to)
+		if room == nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrItemNotFound), nil
+		}
+		return marshalResultIQ(iq, buildRoomDiscoInfo(room)), nil
+	}
+
+	if iq.Type == stanza.IQGet && to.Local == "" && to.Resource == "" && isDiscoItemsIQ(iq.Payload) {
+		return marshalResultIQ(iq, buildConferenceDiscoItems(s.listPublicRooms())), nil
+	}
+
+	if iq.Type == stanza.IQGet && to.Local != "" && to.Resource == "" && isDiscoItemsIQ(iq.Payload) {
+		room := s.getRoom(to)
+		if room == nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrItemNotFound), nil
+		}
+		return marshalResultIQ(iq, buildRoomDiscoItems(room)), nil
+	}
+
+	if to.Local != "" && to.Resource == "" && isMUCOwnerIQ(iq.Payload) {
+		from, ferr := stanza.Parse(iq.From)
+		if ferr != nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
+		}
+		room := s.getRoom(to)
+		if room == nil {
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrItemNotFound), nil
+		}
+		if !room.IsOwner(from) {
+			return marshalErrorIQ(iq, stanza.ErrorTypeAuth, stanza.ErrForbidden), nil
+		}
+
+		switch iq.Type {
+		case stanza.IQGet:
+			return marshalResultIQ(iq, buildOwnerConfigForm(room)), nil
+		case stanza.IQSet:
+			form, ok := parseMUCOwnerSubmit(iq.Payload)
+			if !ok || form == nil {
+				return marshalErrorIQ(iq, stanza.ErrorTypeModify, stanza.ErrBadRequest), nil
+			}
+			if form.Type == "cancel" {
+				return marshalResultIQ(iq, nil), nil
+			}
+			room.ApplyOwnerForm(form.Fields)
+			if err := s.persistRoom(ctx, room); err != nil {
+				s.logger.Warn("muc: persist room failed", "jid", room.JID().String(), "err", err)
+			}
+			return marshalResultIQ(iq, nil), nil
+		default:
+			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrFeatureNotImplemented), nil
+		}
 	}
 
 	if iq.Type == stanza.IQGet && to.Resource != "" && isSelfPingIQ(iq.Payload) {

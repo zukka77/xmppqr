@@ -25,7 +25,7 @@ func joinOccupant(t *testing.T, room *Room, r *router.Router, jidStr, nick strin
 	s := &mockSession{jid: j}
 	r.Register(s)
 	occ := &Occupant{Nick: nick, FullJID: j}
-	if err := room.Join(context.Background(), occ, "", r, nil); err != nil {
+	if err := room.Join(context.Background(), occ, "", r, nil, false); err != nil {
 		t.Fatalf("join %s as %s: %v", jidStr, nick, err)
 	}
 	return s
@@ -152,7 +152,7 @@ func TestSelfPing(t *testing.T) {
 }
 
 func TestSelfPresenceUsesExplicitMUCUserNamespace(t *testing.T) {
-	raw := buildSelfPresence("room@conference.example.com/Alice", "alice@example.com/phone", RoleModerator, AffOwner)
+	raw := buildSelfPresence("room@conference.example.com/Alice", "alice@example.com/phone", RoleModerator, AffOwner, false)
 
 	dec := xml.NewDecoder(strings.NewReader(string(raw)))
 	var sawX, sawItem, sawStatus bool
@@ -182,6 +182,31 @@ func TestSelfPresenceUsesExplicitMUCUserNamespace(t *testing.T) {
 	}
 	if !sawX || !sawItem || !sawStatus {
 		t.Fatalf("expected muc#user namespace on x/item/status, got: %s", raw)
+	}
+}
+
+func TestJoinDeliversSubjectEvenWhenEmpty(t *testing.T) {
+	room, r := makeRoom(t)
+	room.affiliations["alice@example.com"] = AffOwner
+
+	sessA := joinOccupant(t, room, r, "alice@example.com/phone", "Alice")
+
+	var sawSubject bool
+	for _, raw := range sessA.Received() {
+		if !strings.Contains(string(raw), "<subject") {
+			continue
+		}
+		dec := xml.NewDecoder(strings.NewReader(string(raw)))
+		tok, _ := dec.Token()
+		se, ok := tok.(xml.StartElement)
+		if !ok || se.Name.Local != "message" {
+			continue
+		}
+		sawSubject = true
+		break
+	}
+	if !sawSubject {
+		t.Fatalf("join must include a <subject/> message even when empty (XEP-0045 §7.2.16); got %v", sessA.Received())
 	}
 }
 

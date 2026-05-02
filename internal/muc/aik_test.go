@@ -57,7 +57,7 @@ func TestJoinPopulatesOccupantAIK(t *testing.T) {
 		FullJID:        j,
 		AIKFingerprint: "71FD4 C632A",
 	}
-	if err := room.Join(context.Background(), occ, "", r, nil); err != nil {
+	if err := room.Join(context.Background(), occ, "", r, nil, false); err != nil {
 		t.Fatalf("join: %v", err)
 	}
 
@@ -80,7 +80,7 @@ func TestAIKMembersListUpdatesOnJoinAndLeave(t *testing.T) {
 	sA := &mockSession{jid: jA}
 	r.Register(sA)
 	occA := &Occupant{Nick: "Alice", FullJID: jA, AIKFingerprint: "AAA"}
-	if err := room.Join(context.Background(), occA, "", r, nil); err != nil {
+	if err := room.Join(context.Background(), occA, "", r, nil, false); err != nil {
 		t.Fatalf("alice join: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestAIKMembersListUpdatesOnJoinAndLeave(t *testing.T) {
 	sB := &mockSession{jid: jB}
 	r.Register(sB)
 	occB := &Occupant{Nick: "Bob", FullJID: jB, AIKFingerprint: "ZZZ"}
-	if err := room.Join(context.Background(), occB, "", r, nil); err != nil {
+	if err := room.Join(context.Background(), occB, "", r, nil, false); err != nil {
 		t.Fatalf("bob join: %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestAIKMembersIgnoresEmpty(t *testing.T) {
 	sA := &mockSession{jid: jA}
 	r.Register(sA)
 	occA := &Occupant{Nick: "Alice", FullJID: jA}
-	if err := room.Join(context.Background(), occA, "", r, nil); err != nil {
+	if err := room.Join(context.Background(), occA, "", r, nil, false); err != nil {
 		t.Fatalf("join: %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestAIKPassthroughOnJoinBroadcast(t *testing.T) {
 	sA := &mockSession{jid: jA}
 	r.Register(sA)
 	occA := &Occupant{Nick: "Alice", FullJID: jA, AIKFingerprint: "FP-ALICE"}
-	if err := room.Join(context.Background(), occA, "", r, nil); err != nil {
+	if err := room.Join(context.Background(), occA, "", r, nil, false); err != nil {
 		t.Fatalf("alice join: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestAIKPassthroughOnJoinBroadcast(t *testing.T) {
 	sB := &mockSession{jid: jB}
 	r.Register(sB)
 	occB := &Occupant{Nick: "Bob", FullJID: jB, AIKFingerprint: "FP-BOB"}
-	if err := room.Join(context.Background(), occB, "", r, nil); err != nil {
+	if err := room.Join(context.Background(), occB, "", r, nil, false); err != nil {
 		t.Fatalf("bob join: %v", err)
 	}
 

@@ -101,7 +101,7 @@ func roomFromStorage(r *storage.MUCRoom) (*Room, error) {
 
 func (r *Room) JID() stanza.JID { return r.jid }
 
-func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *router.Router, store storage.MUCStore) error {
+func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *router.Router, store storage.MUCStore, roomCreated bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -155,7 +155,7 @@ func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *ro
 		_ = rtr.RouteToFull(ctx, occ.FullJID, presXML)
 	}
 
-	selfPresXML := buildSelfPresence(nickJID.String(), occ.FullJID.String(), occ.Role, occ.Affiliation)
+	selfPresXML := buildSelfPresence(nickJID.String(), occ.FullJID.String(), occ.Role, occ.Affiliation, roomCreated)
 	if err := rtr.RouteToFull(ctx, occ.FullJID, selfPresXML); err != nil {
 		return err
 	}
@@ -175,11 +175,12 @@ func (r *Room) Join(ctx context.Context, occ *Occupant, password string, rtr *ro
 		_ = rtr.RouteToFull(ctx, occ.FullJID, msg.XML)
 	}
 
-	if r.subject != "" {
-		subjFrom := stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: r.subjectChangedBy}
-		subjMsg := buildSubjectMessage(subjFrom.String(), occ.FullJID.String(), r.subject)
-		_ = rtr.RouteToFull(ctx, occ.FullJID, subjMsg)
+	subjFrom := r.jid
+	if r.subjectChangedBy != "" {
+		subjFrom = stanza.JID{Local: r.jid.Local, Domain: r.jid.Domain, Resource: r.subjectChangedBy}
 	}
+	subjMsg := buildSubjectMessage(subjFrom.String(), occ.FullJID.String(), r.subject)
+	_ = rtr.RouteToFull(ctx, occ.FullJID, subjMsg)
 
 	if r.persistent && store != nil {
 		_ = store.PutAffiliation(ctx, &storage.MUCAffiliation{
@@ -352,6 +353,90 @@ func (r *Room) OccupantCount() int {
 	return len(r.occupants)
 }
 
+func (r *Room) OccupantNicks() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	nicks := make([]string, 0, len(r.occupants))
+	for nick := range r.occupants {
+		nicks = append(nicks, nick)
+	}
+	sort.Strings(nicks)
+	return nicks
+}
+
+func (r *Room) IsOwner(j stanza.JID) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	aff, ok := r.affiliations[j.Bare().String()]
+	return ok && aff >= AffOwner
+}
+
+func (r *Room) ApplyOwnerForm(fields map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.persistent = true
+
+	get := func(key string) (string, bool) {
+		v, ok := fields[key]
+		return v, ok
+	}
+	getBool := func(key string) (bool, bool) {
+		if v, ok := get(key); ok {
+			switch v {
+			case "1", "true":
+				return true, true
+			case "0", "false":
+				return false, true
+			}
+		}
+		return false, false
+	}
+
+	if v, ok := get("muc#roomconfig_roomname"); ok {
+		r.config.Name = v
+	}
+	if v, ok := get("muc#roomconfig_roomdesc"); ok {
+		r.config.Description = v
+	}
+	if v, ok := getBool("muc#roomconfig_persistentroom"); ok {
+		r.persistent = v
+	}
+	if v, ok := getBool("muc#roomconfig_publicroom"); ok {
+		r.config.Public = v
+	}
+	if v, ok := getBool("muc#roomconfig_membersonly"); ok {
+		r.config.MembersOnly = v
+	}
+	if v, ok := getBool("muc#roomconfig_moderatedroom"); ok {
+		r.config.Moderated = v
+	}
+	if v, ok := getBool("muc#roomconfig_passwordprotectedroom"); ok {
+		r.config.PasswordProtected = v
+	}
+	if v, ok := get("muc#roomconfig_roomsecret"); ok {
+		r.config.Password = v
+	}
+	if v, ok := get("muc#roomconfig_whois"); ok {
+		switch v {
+		case "anyone":
+			r.config.AnonymityMode = AnonymityNonAnon
+		case "moderators":
+			r.config.AnonymityMode = AnonymitySemi
+		}
+	}
+	r.config.PersistRoom = r.persistent
+}
+
+func (r *Room) DisplayName() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.config.Name != "" {
+		return r.config.Name
+	}
+	return r.jid.Local
+}
+
 func (r *Room) recomputeAIKMembers() {
 	seen := make(map[string]struct{})
 	for _, occ := range r.occupants {
@@ -392,12 +477,12 @@ func buildOccupantPresence(from, to string, role, affiliation int, unavailable b
 	return raw
 }
 
-func buildSelfPresence(from, to string, role, affiliation int) []byte {
+func buildSelfPresence(from, to string, role, affiliation int, created bool) []byte {
 	p := &stanza.Presence{
 		From: from,
 		To:   to,
 	}
-	xElem := buildMUCUserXSelf(role, affiliation)
+	xElem := buildMUCUserXSelf(role, affiliation, created)
 	p.Children = xElem
 	raw, _ := p.Marshal()
 	return raw
@@ -438,7 +523,7 @@ func buildMUCUserX(role, affiliation int, realJID string) []byte {
 	return buf.Bytes()
 }
 
-func buildMUCUserXSelf(role, affiliation int) []byte {
+func buildMUCUserXSelf(role, affiliation int, created bool) []byte {
 	var buf bytes.Buffer
 	enc := xml.NewEncoder(&buf)
 	x := xml.StartElement{Name: xml.Name{Space: nsMUCUser, Local: "x"}}
@@ -452,26 +537,170 @@ func buildMUCUserXSelf(role, affiliation int) []byte {
 	}
 	enc.EncodeToken(item)
 	enc.EncodeToken(item.End())
-	status := xml.StartElement{
-		Name: xml.Name{Space: nsMUCUser, Local: "status"},
-		Attr: []xml.Attr{{Name: xml.Name{Local: "code"}, Value: "110"}},
+	codes := []string{"110"}
+	if created {
+		codes = append(codes, "201")
 	}
-	enc.EncodeToken(status)
-	enc.EncodeToken(status.End())
+	for _, code := range codes {
+		status := xml.StartElement{
+			Name: xml.Name{Space: nsMUCUser, Local: "status"},
+			Attr: []xml.Attr{{Name: xml.Name{Local: "code"}, Value: code}},
+		}
+		enc.EncodeToken(status)
+		enc.EncodeToken(status.End())
+	}
 	enc.EncodeToken(x.End())
 	enc.Flush()
 	return buf.Bytes()
 }
 
-func buildSubjectMessage(from, to, subject string) []byte {
-	m := &stanza.Message{
-		From:    from,
-		To:      to,
-		Type:    stanza.MessageGroupchat,
-		Subject: subject,
+func buildRoomDiscoInfo(room *Room) []byte {
+	room.mu.RLock()
+	cfg := room.config
+	persistent := room.persistent
+	name := cfg.Name
+	if name == "" {
+		name = room.jid.Local
 	}
-	raw, _ := m.Marshal()
-	return raw
+	room.mu.RUnlock()
+
+	feat := func(v string) string {
+		return `<feature var='` + xmlAttrEscape(v) + `'/>`
+	}
+
+	var b bytes.Buffer
+	b.WriteString(`<query xmlns='http://jabber.org/protocol/disco#info'>`)
+	b.WriteString(`<identity category='conference' type='text' name='` + xmlAttrEscape(name) + `'/>`)
+	b.WriteString(feat("http://jabber.org/protocol/muc"))
+	b.WriteString(feat("http://jabber.org/protocol/disco#info"))
+	b.WriteString(feat("http://jabber.org/protocol/disco#items"))
+	b.WriteString(feat("urn:xmpp:ping"))
+
+	if persistent {
+		b.WriteString(feat("muc_persistent"))
+	} else {
+		b.WriteString(feat("muc_temporary"))
+	}
+	if cfg.MembersOnly {
+		b.WriteString(feat("muc_membersonly"))
+	} else {
+		b.WriteString(feat("muc_open"))
+	}
+	if cfg.Public {
+		b.WriteString(feat("muc_public"))
+	} else {
+		b.WriteString(feat("muc_hidden"))
+	}
+	if cfg.PasswordProtected {
+		b.WriteString(feat("muc_passwordprotected"))
+	} else {
+		b.WriteString(feat("muc_unsecured"))
+	}
+	if cfg.Moderated {
+		b.WriteString(feat("muc_moderated"))
+	} else {
+		b.WriteString(feat("muc_unmoderated"))
+	}
+	switch cfg.AnonymityMode {
+	case AnonymityNonAnon:
+		b.WriteString(feat("muc_nonanonymous"))
+	default:
+		b.WriteString(feat("muc_semianonymous"))
+	}
+	b.WriteString(`</query>`)
+	return b.Bytes()
+}
+
+func buildOwnerConfigForm(room *Room) []byte {
+	room.mu.RLock()
+	cfg := room.config
+	persistent := room.persistent
+	room.mu.RUnlock()
+
+	bool01 := func(b bool) string {
+		if b {
+			return "1"
+		}
+		return "0"
+	}
+	whois := "moderators"
+	if cfg.AnonymityMode == AnonymityNonAnon {
+		whois = "anyone"
+	}
+
+	var b bytes.Buffer
+	b.WriteString(`<query xmlns='http://jabber.org/protocol/muc#owner'>`)
+	b.WriteString(`<x xmlns='jabber:x:data' type='form'>`)
+	b.WriteString(`<title>Room configuration</title>`)
+	b.WriteString(`<field var='FORM_TYPE' type='hidden'><value>http://jabber.org/protocol/muc#roomconfig</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_roomname' type='text-single' label='Room name'><value>` + xmlAttrEscape(cfg.Name) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_roomdesc' type='text-single' label='Description'><value>` + xmlAttrEscape(cfg.Description) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_persistentroom' type='boolean' label='Persistent'><value>` + bool01(persistent) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_publicroom' type='boolean' label='Publicly listed'><value>` + bool01(cfg.Public) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_membersonly' type='boolean' label='Members only'><value>` + bool01(cfg.MembersOnly) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_moderatedroom' type='boolean' label='Moderated'><value>` + bool01(cfg.Moderated) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_passwordprotectedroom' type='boolean' label='Password protected'><value>` + bool01(cfg.PasswordProtected) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_roomsecret' type='text-private' label='Password'><value>` + xmlAttrEscape(cfg.Password) + `</value></field>`)
+	b.WriteString(`<field var='muc#roomconfig_whois' type='list-single' label='Real-JID visible to'>`)
+	b.WriteString(`<value>` + whois + `</value>`)
+	b.WriteString(`<option label='Moderators only'><value>moderators</value></option>`)
+	b.WriteString(`<option label='Anyone'><value>anyone</value></option>`)
+	b.WriteString(`</field>`)
+	b.WriteString(`</x>`)
+	b.WriteString(`</query>`)
+	return b.Bytes()
+}
+
+func buildConferenceDiscoItems(rooms []*Room) []byte {
+	var b bytes.Buffer
+	b.WriteString(`<query xmlns='http://jabber.org/protocol/disco#items'>`)
+	for _, room := range rooms {
+		b.WriteString(`<item jid='` + xmlAttrEscape(room.JID().String()) + `' name='` + xmlAttrEscape(room.DisplayName()) + `'/>`)
+	}
+	b.WriteString(`</query>`)
+	return b.Bytes()
+}
+
+func buildRoomDiscoItems(room *Room) []byte {
+	roomJID := room.JID()
+	nicks := room.OccupantNicks()
+	var b bytes.Buffer
+	b.WriteString(`<query xmlns='http://jabber.org/protocol/disco#items'>`)
+	for _, nick := range nicks {
+		nj := stanza.JID{Local: roomJID.Local, Domain: roomJID.Domain, Resource: nick}
+		b.WriteString(`<item jid='` + xmlAttrEscape(nj.String()) + `'/>`)
+	}
+	b.WriteString(`</query>`)
+	return b.Bytes()
+}
+
+func xmlAttrEscape(s string) string {
+	var b bytes.Buffer
+	xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
+func buildSubjectMessage(from, to, subject string) []byte {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+	start := xml.StartElement{
+		Name: xml.Name{Local: "message"},
+		Attr: []xml.Attr{
+			{Name: xml.Name{Local: "from"}, Value: from},
+			{Name: xml.Name{Local: "to"}, Value: to},
+			{Name: xml.Name{Local: "type"}, Value: stanza.MessageGroupchat},
+		},
+	}
+	enc.EncodeToken(start)
+	subjStart := xml.StartElement{Name: xml.Name{Local: "subject"}}
+	enc.EncodeToken(subjStart)
+	if subject != "" {
+		enc.EncodeToken(xml.CharData(subject))
+	}
+	enc.EncodeToken(subjStart.End())
+	enc.EncodeToken(start.End())
+	enc.Flush()
+	return buf.Bytes()
 }
 
 func rewriteMessageFrom(raw []byte, newFrom string) ([]byte, error) {

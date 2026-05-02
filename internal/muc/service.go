@@ -62,10 +62,10 @@ func (s *Service) LoadPersistent(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) getOrCreateRoom(ctx context.Context, roomJID stanza.JID, firstOwnerJID stanza.JID) *Room {
+func (s *Service) getOrCreateRoom(ctx context.Context, roomJID stanza.JID, firstOwnerJID stanza.JID) (*Room, bool) {
 	key := roomJID.Bare().String()
 	if v, ok := s.rooms.Load(key); ok {
-		return v.(*Room)
+		return v.(*Room), false
 	}
 
 	cfg := RoomConfig{
@@ -80,9 +80,9 @@ func (s *Service) getOrCreateRoom(ctx context.Context, roomJID stanza.JID, first
 
 	actual, loaded := s.rooms.LoadOrStore(key, room)
 	if loaded {
-		return actual.(*Room)
+		return actual.(*Room), false
 	}
-	return room
+	return room, true
 }
 
 func (s *Service) getRoom(roomJID stanza.JID) *Room {
@@ -91,6 +91,21 @@ func (s *Service) getRoom(roomJID stanza.JID) *Room {
 		return v.(*Room)
 	}
 	return nil
+}
+
+func (s *Service) listPublicRooms() []*Room {
+	var out []*Room
+	s.rooms.Range(func(_, v interface{}) bool {
+		room := v.(*Room)
+		room.mu.RLock()
+		public := room.config.Public
+		room.mu.RUnlock()
+		if public {
+			out = append(out, room)
+		}
+		return true
+	})
+	return out
 }
 
 func (s *Service) persistRoom(ctx context.Context, room *Room) error {
