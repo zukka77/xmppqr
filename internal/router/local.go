@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"hash/fnv"
+	"log"
 	"sync"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
@@ -106,32 +107,64 @@ func (r *Router) RouteToBare(ctx context.Context, bare stanza.JID, raw []byte) (
 	key := bare.String()
 	list := r.shardFor(key).get(key)
 
+	totalSessions := len(list)
+	availableCount := 0
 	maxPri := 0
 	hasAvailable := false
 	for _, s := range list {
 		if !s.IsAvailable() {
 			continue
 		}
+		availableCount++
 		p := s.Priority()
 		if !hasAvailable || p > maxPri {
 			maxPri = p
 			hasAvailable = true
 		}
 	}
-	if !hasAvailable {
-		return 0, ErrNoSession
-	}
 
 	delivered := 0
-	for _, s := range list {
-		if s.IsAvailable() && s.Priority() == maxPri {
+	if hasAvailable {
+		// Standard path: deliver to all available sessions tied for highest
+		// priority (RFC 6121 §8.5.3.2.2 SHOULD).
+		for _, s := range list {
+			if s.IsAvailable() && s.Priority() == maxPri {
+				if err := s.Deliver(ctx, raw); err == nil {
+					delivered++
+				} else {
+					log.Printf("xmppqr diag: RouteToBare(%s) Deliver to %s failed: %v",
+						key, s.JID().String(), err)
+				}
+			}
+		}
+	} else if totalSessions > 0 {
+		// Fallback: no resource has broadcast `<presence>` (modern clients
+		// using bind2/SASL2 sometimes skip the initial directed-presence
+		// broadcast and only send MUC-join presences, leaving s.avail=0
+		// even though the c2s session is fully bound and reading stanzas).
+		// Without this fallback, every chat-typed pairwise message
+		// addressed to such a client's bare JID gets dropped here while
+		// MUC-routed groupchats reach them just fine — pure asymmetry
+		// that surfaces as "Conversations doesn't see dino's pairwise
+		// sender-chain announcements". Deliver to every bound session.
+		log.Printf("xmppqr diag: RouteToBare(%s) — no AVAILABLE sessions (total=%d); falling back to bound-session delivery",
+			key, totalSessions)
+		for _, s := range list {
 			if err := s.Deliver(ctx, raw); err == nil {
 				delivered++
+			} else {
+				log.Printf("xmppqr diag: RouteToBare(%s) bound-fallback Deliver to %s failed: %v",
+					key, s.JID().String(), err)
 			}
 		}
 	}
+
 	if delivered == 0 {
+		log.Printf("xmppqr diag: RouteToBare(%s) — no session (total=%d available=%d)",
+			key, totalSessions, availableCount)
 		return 0, ErrNoSession
 	}
+	log.Printf("xmppqr diag: RouteToBare(%s) delivered to %d session(s) (total=%d available=%d)",
+		key, delivered, totalSessions, availableCount)
 	return delivered, nil
 }
