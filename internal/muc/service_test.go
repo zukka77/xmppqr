@@ -585,6 +585,121 @@ func hasXMLAttr(raw []byte, elem, attr, val string) bool {
 	return false
 }
 
+// TestOwnerConfigSubmitBroadcastsStatus104 verifies that a successful
+// muc#owner config submit triggers a status-104 broadcast (XEP-0045 §10.2)
+// so clients refetch disco-info and stop treating the room as open/anonymous.
+func TestOwnerConfigSubmitBroadcastsStatus104(t *testing.T) {
+	svc, r := newTestService(t)
+	ctx := context.Background()
+
+	sessA := registerSession(r, "alice@example.com/phone")
+	_ = sessA
+	fromA, _ := stanza.Parse("alice@example.com/phone")
+	toA, _ := stanza.Parse("priv@conference.example.com/Alice")
+	if err := svc.HandleStanza(ctx, presenceXML(fromA.String(), toA.Bare().String(), "Alice"), "presence", fromA, toA); err != nil {
+		t.Fatalf("alice join: %v", err)
+	}
+	beforeCount := len(sessA.Received())
+
+	// Submit muc#owner config form turning the room into private+non-anonymous.
+	form := []byte(`<query xmlns='http://jabber.org/protocol/muc#owner'>` +
+		`<x xmlns='jabber:x:data' type='submit'>` +
+		`<field var='FORM_TYPE'><value>http://jabber.org/protocol/muc#roomconfig</value></field>` +
+		`<field var='muc#roomconfig_membersonly'><value>1</value></field>` +
+		`<field var='muc#roomconfig_publicroom'><value>0</value></field>` +
+		`<field var='muc#roomconfig_whois'><value>anyone</value></field>` +
+		`</x></query>`)
+	iq := &stanza.IQ{
+		ID:      "config1",
+		From:    "alice@example.com/phone",
+		To:      "priv@conference.example.com",
+		Type:    stanza.IQSet,
+		Payload: form,
+	}
+	resp, err := svc.HandleIQ(ctx, iq)
+	if err != nil {
+		t.Fatalf("HandleIQ: %v", err)
+	}
+	if !strings.Contains(string(resp), `type="result"`) {
+		t.Fatalf("expected result IQ, got: %s", resp)
+	}
+
+	// Alice should now see a status-104 (and 172, since whois=anyone) message.
+	got := sessA.Received()[beforeCount:]
+	var found104, found172 bool
+	for _, raw := range got {
+		s := string(raw)
+		if strings.Contains(s, `code='104'`) || strings.Contains(s, `code="104"`) {
+			found104 = true
+		}
+		if strings.Contains(s, `code='172'`) || strings.Contains(s, `code="172"`) {
+			found172 = true
+		}
+	}
+	if !found104 {
+		t.Errorf("expected status 104 broadcast after config submit; got: %v", got)
+	}
+	if !found172 {
+		t.Errorf("expected status 172 (now non-anonymous) broadcast; got: %v", got)
+	}
+}
+
+// TestJoinDeliversSelfPresence: dino-style strict check that the joiner
+// receives a self-presence with status code 110 and the from/to attributes
+// dino's xmpp-vala parser expects (from='room@host/Nick', to=joiner-full-jid).
+func TestJoinDeliversSelfPresence(t *testing.T) {
+	svc, r := newTestService(t)
+	ctx := context.Background()
+
+	// Alice owns and joins the room first so it exists in s.rooms.
+	sessA := registerSession(r, "alice@example.com/phone")
+	_ = sessA
+	fromA, _ := stanza.Parse("alice@example.com/phone")
+	toA, _ := stanza.Parse("testroom@conference.example.com/Alice")
+	if err := svc.HandleStanza(ctx, presenceXML(fromA.String(), toA.Bare().String(), "Alice"), "presence", fromA, toA); err != nil {
+		t.Fatalf("alice join: %v", err)
+	}
+
+	// Bob (dino) joins the existing room.
+	sessB := registerSession(r, "bob@example.com/phone")
+	fromB, _ := stanza.Parse("bob@example.com/phone")
+	toB, _ := stanza.Parse("testroom@conference.example.com/Bob")
+	if err := svc.HandleStanza(ctx, presenceXML(fromB.String(), toB.Bare().String(), "Bob"), "presence", fromB, toB); err != nil {
+		t.Fatalf("bob join: %v", err)
+	}
+
+	// Bob must receive at least one self-presence with status 110, from='room/Bob',
+	// and to is bob's full JID. Otherwise dino stays in "Joining".
+	var sawSelf bool
+	for _, raw := range sessB.Received() {
+		s := string(raw)
+		if !strings.Contains(s, `code="110"`) && !strings.Contains(s, "code='110'") {
+			continue
+		}
+		if !strings.Contains(s, `from="testroom@conference.example.com/Bob"`) &&
+			!strings.Contains(s, "from='testroom@conference.example.com/Bob'") {
+			continue
+		}
+		if !strings.Contains(s, `to="bob@example.com/phone"`) &&
+			!strings.Contains(s, "to='bob@example.com/phone'") {
+			continue
+		}
+		sawSelf = true
+		break
+	}
+	if !sawSelf {
+		t.Fatalf("bob never saw self-presence (110) addressed to him; received=%q", stringSlice(sessB.Received()))
+	}
+}
+
+func stringSlice(b [][]byte) []string {
+	out := make([]string, len(b))
+	for i, x := range b {
+		out[i] = string(x)
+	}
+	return out
+}
+
 // TestMediatedInviteOpenRoom verifies XEP-0045 §7.8 forwarding for an open room.
 func TestMediatedInviteOpenRoom(t *testing.T) {
 	svc, r := newTestService(t)

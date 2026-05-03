@@ -882,6 +882,78 @@ func (r *Room) IsOwner(j stanza.JID) bool {
 	return ok && aff >= AffOwner
 }
 
+// snapshotConfig returns a shallow copy of the room's config under the lock.
+// Used to diff before/after ApplyOwnerForm so the server can pick the right
+// muc#user status codes per XEP-0045 §10.2.
+func (r *Room) snapshotConfig() RoomConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.config
+}
+
+// BroadcastConfigChange notifies every occupant that the room configuration
+// changed (XEP-0045 §10.2). Includes status code 104 (catch-all "config has
+// changed") plus any of the more specific codes that apply, so well-behaved
+// clients (Conversations, dino) refetch disco-info immediately rather than
+// waiting for their cached features to expire.
+func (r *Room) BroadcastConfigChange(ctx context.Context, oldCfg RoomConfig, rtr *router.Router) {
+	codes := []string{"104"}
+	if oldCfg.AnonymityMode != r.config.AnonymityMode {
+		switch r.config.AnonymityMode {
+		case AnonymityNonAnon:
+			codes = append(codes, "172") // now non-anonymous (real JIDs visible)
+		case AnonymitySemi:
+			codes = append(codes, "173") // now semi-anonymous
+		}
+	}
+
+	r.mu.RLock()
+	from := r.jid.String()
+	occs := make([]stanza.JID, 0, len(r.occupants))
+	for _, occ := range r.occupants {
+		occs = append(occs, occ.FullJID)
+	}
+	r.mu.RUnlock()
+
+	if len(occs) == 0 {
+		return
+	}
+
+	var b bytes.Buffer
+	b.WriteString(`<message from='`)
+	b.WriteString(xmlAttrEscape(from))
+	b.WriteString(`' type='groupchat'><x xmlns='`)
+	b.WriteString(nsMUCUser)
+	b.WriteString(`'>`)
+	for _, c := range codes {
+		b.WriteString(`<status code='`)
+		b.WriteString(c)
+		b.WriteString(`'/>`)
+	}
+	b.WriteString(`</x></message>`)
+	tmpl := b.Bytes()
+
+	for _, full := range occs {
+		// Stamp per-recipient `to` so clients can route correctly.
+		var pb bytes.Buffer
+		pb.WriteString(`<message from='`)
+		pb.WriteString(xmlAttrEscape(from))
+		pb.WriteString(`' to='`)
+		pb.WriteString(xmlAttrEscape(full.String()))
+		pb.WriteString(`' type='groupchat'><x xmlns='`)
+		pb.WriteString(nsMUCUser)
+		pb.WriteString(`'>`)
+		for _, c := range codes {
+			pb.WriteString(`<status code='`)
+			pb.WriteString(c)
+			pb.WriteString(`'/>`)
+		}
+		pb.WriteString(`</x></message>`)
+		_ = rtr.RouteToFull(ctx, full, pb.Bytes())
+	}
+	_ = tmpl
+}
+
 // CanInvite reports whether the bare JID of j is allowed to send a mediated
 // invitation. In members-only rooms, only members and above; in open rooms,
 // any current occupant. Mirrors the default rule from XEP-0045 §7.8.

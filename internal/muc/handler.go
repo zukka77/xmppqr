@@ -86,7 +86,16 @@ func (s *Service) handlePresence(ctx context.Context, raw []byte, from stanza.JI
 		FullJID:        from,
 		AIKFingerprint: parseAIKExtension(raw),
 	}
-	return room.Join(ctx, occ, password, s.router, s.store, created)
+	err = room.Join(ctx, occ, password, s.router, s.store, created)
+	if s.logger != nil {
+		s.logger.Debug("muc: join attempt",
+			"room", to.Bare().String(),
+			"nick", nick,
+			"full_jid", from.String(),
+			"created", created,
+			"err", err)
+	}
+	return err
 }
 
 func (s *Service) handleMessage(ctx context.Context, raw []byte, from stanza.JID, to stanza.JID) error {
@@ -302,10 +311,15 @@ func (s *Service) HandleIQ(ctx context.Context, iq *stanza.IQ) ([]byte, error) {
 			if form.Type == "cancel" {
 				return marshalResultIQ(iq, nil), nil
 			}
+			oldCfg := room.snapshotConfig()
 			room.ApplyOwnerForm(form.Fields)
 			if err := s.persistRoom(ctx, room); err != nil {
 				s.logger.Warn("muc: persist room failed", "jid", room.JID().String(), "err", err)
 			}
+			// XEP-0045 §10.2: announce config change so clients refetch
+			// disco-info instead of acting on stale features (e.g. defaulting
+			// to plaintext in a now-private+non-anonymous room).
+			room.BroadcastConfigChange(ctx, oldCfg, s.router)
 			return marshalResultIQ(iq, nil), nil
 		default:
 			return marshalErrorIQ(iq, stanza.ErrorTypeCancel, stanza.ErrFeatureNotImplemented), nil
