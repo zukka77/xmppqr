@@ -584,3 +584,80 @@ func hasXMLAttr(raw []byte, elem, attr, val string) bool {
 	}
 	return false
 }
+
+// TestMediatedInviteOpenRoom verifies XEP-0045 §7.8 forwarding for an open room.
+func TestMediatedInviteOpenRoom(t *testing.T) {
+	svc, r := newTestService(t)
+	ctx := context.Background()
+
+	sessA := registerSession(r, "alice@example.com/phone")
+	sessB := registerSession(r, "bob@example.com/phone")
+	_ = sessA
+
+	// Alice joins, Bob is offline-but-known to the router.
+	fromA, _ := stanza.Parse("alice@example.com/phone")
+	toA, _ := stanza.Parse("openroom@conference.example.com/Alice")
+	if err := svc.HandleStanza(ctx, presenceXML(fromA.String(), toA.Bare().String(), "Alice"), "presence", fromA, toA); err != nil {
+		t.Fatalf("alice join: %v", err)
+	}
+
+	roomBare, _ := stanza.Parse("openroom@conference.example.com")
+	invite := []byte(`<message from='alice@example.com/phone' to='openroom@conference.example.com'>` +
+		`<x xmlns='http://jabber.org/protocol/muc#user'>` +
+		`<invite to='bob@example.com'><reason>join us</reason></invite>` +
+		`</x></message>`)
+	if err := svc.HandleStanza(ctx, invite, "message", fromA, roomBare); err != nil {
+		t.Fatalf("forward invite: %v", err)
+	}
+
+	recvB := sessB.Received()
+	if len(recvB) == 0 {
+		t.Fatal("bob received no invitation forward")
+	}
+	got := string(recvB[len(recvB)-1])
+	if !strings.Contains(got, `from="openroom@conference.example.com"`) && !strings.Contains(got, "from='openroom@conference.example.com'") {
+		t.Errorf("forwarded message must come from room bare JID; got: %s", got)
+	}
+	if !strings.Contains(got, `to="bob@example.com"`) && !strings.Contains(got, "to='bob@example.com'") {
+		t.Errorf("forwarded message must address invitee; got: %s", got)
+	}
+	if !strings.Contains(got, `from="alice@example.com"`) && !strings.Contains(got, "from='alice@example.com'") {
+		t.Errorf("forwarded <invite> must carry inviter's bare JID; got: %s", got)
+	}
+	if !strings.Contains(got, `<reason>join us</reason>`) {
+		t.Errorf("forwarded invite must preserve reason; got: %s", got)
+	}
+	if !strings.Contains(got, "jabber:x:conference") {
+		t.Errorf("forwarded message should include XEP-0249 shortcut; got: %s", got)
+	}
+}
+
+// TestMediatedInviteRequiresOccupant rejects invites from non-occupants of a
+// members-only room.
+func TestMediatedInviteRequiresOccupant(t *testing.T) {
+	svc, r := newTestService(t)
+	ctx := context.Background()
+
+	roomJID, _ := stanza.Parse("priv@conference.example.com")
+	cfg := RoomConfig{Public: false, MembersOnly: true}
+	room := newRoom(roomJID.Bare(), cfg, false, nil, nil)
+	room.affiliations["alice@example.com"] = AffOwner
+	svc.rooms.Store(roomJID.Bare().String(), room)
+
+	_ = registerSession(r, "mallory@example.com/x")
+	sessB := registerSession(r, "bob@example.com/phone")
+
+	mallory, _ := stanza.Parse("mallory@example.com/x")
+	invite := []byte(`<message from='mallory@example.com/x' to='priv@conference.example.com'>` +
+		`<x xmlns='http://jabber.org/protocol/muc#user'><invite to='bob@example.com'/></x></message>`)
+	err := svc.HandleStanza(ctx, invite, "message", mallory, roomJID)
+	if err == nil {
+		t.Fatal("expected forbidden error from non-member inviter to members-only room")
+	}
+	if se, ok := err.(*stanza.StanzaError); !ok || se.Condition != stanza.ErrForbidden {
+		t.Errorf("expected forbidden, got %v", err)
+	}
+	if got := sessB.Received(); len(got) != 0 {
+		t.Errorf("bob must not receive any invite forward; got %d", len(got))
+	}
+}

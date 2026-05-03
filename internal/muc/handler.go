@@ -104,6 +104,15 @@ func (s *Service) handleMessage(ctx context.Context, raw []byte, from stanza.JID
 		return err
 	}
 
+	// Mediated invitation (XEP-0045 §7.8) arrives as a non-groupchat message
+	// addressed to the room's bare JID with a <x xmlns='muc#user'><invite/></x>
+	// child. The room rewrites and forwards it to the invitee.
+	if m.Type != stanza.MessageGroupchat && to.Resource == "" {
+		if inv := parseMUCUserInvite(m.Children); inv != nil && inv.To != "" {
+			return s.forwardMediatedInvite(ctx, from, to, m, inv)
+		}
+	}
+
 	if m.Type != stanza.MessageGroupchat {
 		return nil
 	}
@@ -130,6 +139,99 @@ func (s *Service) handleMessage(ctx context.Context, raw []byte, from stanza.JID
 	}
 
 	return room.BroadcastMessage(ctx, from, raw, s.router)
+}
+
+// forwardMediatedInvite implements XEP-0045 §7.8.2: rewrite an inviter's
+// <message to='room'><x xmlns='muc#user'><invite to='invitee'/></x></message>
+// into a server-stamped forward to the invitee, carrying the inviter's bare
+// JID, the optional reason, and (if the room is password-protected) the
+// password. Also includes a <x xmlns='jabber:x:conference'/> shortcut so
+// clients that don't grok muc#user still see the invitation.
+func (s *Service) forwardMediatedInvite(ctx context.Context, from stanza.JID, to stanza.JID, m *stanza.Message, inv *MUCUserInvite) error {
+	room := s.getRoom(to)
+	if room == nil {
+		return &stanza.StanzaError{Type: stanza.ErrorTypeCancel, Condition: stanza.ErrItemNotFound}
+	}
+	if !room.CanInvite(from) {
+		return &stanza.StanzaError{Type: stanza.ErrorTypeAuth, Condition: stanza.ErrForbidden}
+	}
+	invitee, perr := stanza.Parse(inv.To)
+	if perr != nil || invitee.Local == "" {
+		return &stanza.StanzaError{Type: stanza.ErrorTypeModify, Condition: stanza.ErrBadRequest}
+	}
+
+	password, passwordProtected, _ := room.SnapshotInviteContext()
+	// An inviter MAY supply the password; honor that over the room's stored one
+	// so password-rotation flows still work for the invitee.
+	if pw := parseMUCUserPassword(m.Children); pw != "" {
+		password = pw
+	}
+
+	roomJID := to.Bare().String()
+	inviterBare := from.Bare().String()
+
+	var b bytes.Buffer
+	b.WriteString(`<message from='`)
+	b.WriteString(xmlAttrEscape(roomJID))
+	b.WriteString(`' to='`)
+	b.WriteString(xmlAttrEscape(invitee.Bare().String()))
+	b.WriteString(`'>`)
+	b.WriteString(`<x xmlns='`)
+	b.WriteString(nsMUCUser)
+	b.WriteString(`'><invite from='`)
+	b.WriteString(xmlAttrEscape(inviterBare))
+	b.WriteString(`'>`)
+	if inv.Reason != "" {
+		b.WriteString(`<reason>`)
+		b.WriteString(xmlAttrEscape(inv.Reason))
+		b.WriteString(`</reason>`)
+	}
+	if inv.Thread != "" {
+		b.WriteString(`<continue thread='`)
+		b.WriteString(xmlAttrEscape(inv.Thread))
+		b.WriteString(`'/>`)
+	}
+	b.WriteString(`</invite>`)
+	if passwordProtected && password != "" {
+		b.WriteString(`<password>`)
+		b.WriteString(xmlAttrEscape(password))
+		b.WriteString(`</password>`)
+	}
+	b.WriteString(`</x>`)
+
+	// XEP-0249 direct-invite shortcut for clients that only support that form.
+	b.WriteString(`<x xmlns='jabber:x:conference' jid='`)
+	b.WriteString(xmlAttrEscape(roomJID))
+	b.WriteString(`'`)
+	if passwordProtected && password != "" {
+		b.WriteString(` password='`)
+		b.WriteString(xmlAttrEscape(password))
+		b.WriteString(`'`)
+	}
+	if inv.Reason != "" {
+		b.WriteString(` reason='`)
+		b.WriteString(xmlAttrEscape(inv.Reason))
+		b.WriteString(`'`)
+	}
+	b.WriteString(`/>`)
+
+	// Plain-text fallback body so non-MUC clients still see something useful.
+	b.WriteString(`<body>`)
+	b.WriteString(xmlAttrEscape(inviterBare))
+	b.WriteString(` invited you to the room `)
+	b.WriteString(xmlAttrEscape(roomJID))
+	if inv.Reason != "" {
+		b.WriteString(` (`)
+		b.WriteString(xmlAttrEscape(inv.Reason))
+		b.WriteString(`)`)
+	}
+	b.WriteString(`</body>`)
+	b.WriteString(`</message>`)
+
+	if _, err := s.router.RouteToBare(ctx, invitee, b.Bytes()); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Service) HandleIQ(ctx context.Context, iq *stanza.IQ) ([]byte, error) {

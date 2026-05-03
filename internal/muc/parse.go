@@ -133,6 +133,129 @@ func parseMUCAdminItems(payload []byte) ([]AdminItem, bool) {
 	return items, inAdmin
 }
 
+// MUCUserInvite is a parsed mediated-invite payload (XEP-0045 §7.8).
+// Inviter sends `<message to='room'><x xmlns='muc#user'><invite to='invitee'><reason/></invite></x></message>`.
+type MUCUserInvite struct {
+	To     string // bare JID of invitee
+	Reason string // optional human reason
+	Thread string // optional <continue thread='...'/>
+}
+
+// parseMUCUserInvite extracts the first <invite/> child of <x xmlns='muc#user'>
+// from a message stanza body. Returns nil if absent.
+func parseMUCUserInvite(raw []byte) *MUCUserInvite {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if se.Name.Local != "x" || se.Name.Space != nsMUCUser {
+			continue
+		}
+		// Inside <x xmlns='muc#user'>; look for <invite/>.
+		for {
+			t2, e2 := dec.Token()
+			if e2 != nil {
+				return nil
+			}
+			switch v := t2.(type) {
+			case xml.StartElement:
+				if v.Name.Local != "invite" {
+					if err := dec.Skip(); err != nil {
+						return nil
+					}
+					continue
+				}
+				inv := &MUCUserInvite{}
+				for _, a := range v.Attr {
+					if a.Name.Local == "to" {
+						inv.To = a.Value
+					}
+				}
+				for {
+					t3, e3 := dec.Token()
+					if e3 != nil {
+						return inv
+					}
+					switch w := t3.(type) {
+					case xml.StartElement:
+						switch w.Name.Local {
+						case "reason":
+							var s string
+							if e4 := dec.DecodeElement(&s, &w); e4 == nil {
+								inv.Reason = s
+							}
+						case "continue":
+							for _, a := range w.Attr {
+								if a.Name.Local == "thread" {
+									inv.Thread = a.Value
+								}
+							}
+							_ = dec.Skip()
+						default:
+							_ = dec.Skip()
+						}
+					case xml.EndElement:
+						if w.Name.Local == "invite" {
+							return inv
+						}
+					}
+				}
+			case xml.EndElement:
+				if v.Name.Local == "x" {
+					return nil
+				}
+			}
+		}
+	}
+}
+
+// parseMUCUserPassword extracts the optional <password/> sibling of <invite/>
+// inside <x xmlns='muc#user'>. Used when the inviter wants to convey the room
+// password to the invitee.
+func parseMUCUserPassword(raw []byte) string {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if se.Name.Local != "x" || se.Name.Space != nsMUCUser {
+			continue
+		}
+		for {
+			t2, e2 := dec.Token()
+			if e2 != nil {
+				return ""
+			}
+			switch v := t2.(type) {
+			case xml.StartElement:
+				if v.Name.Local == "password" {
+					var s string
+					if e3 := dec.DecodeElement(&s, &v); e3 == nil {
+						return s
+					}
+				} else {
+					_ = dec.Skip()
+				}
+			case xml.EndElement:
+				if v.Name.Local == "x" {
+					return ""
+				}
+			}
+		}
+	}
+}
+
 type joinElement struct {
 	Password string
 }

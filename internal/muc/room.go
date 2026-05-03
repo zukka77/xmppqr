@@ -882,6 +882,33 @@ func (r *Room) IsOwner(j stanza.JID) bool {
 	return ok && aff >= AffOwner
 }
 
+// CanInvite reports whether the bare JID of j is allowed to send a mediated
+// invitation. In members-only rooms, only members and above; in open rooms,
+// any current occupant. Mirrors the default rule from XEP-0045 §7.8.
+func (r *Room) CanInvite(j stanza.JID) bool {
+	bare := j.Bare().String()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	aff := r.affiliations[bare]
+	if r.config.MembersOnly {
+		return aff >= AffMember
+	}
+	for _, occ := range r.occupants {
+		if occ.FullJID.Bare().String() == bare {
+			return true
+		}
+	}
+	return aff >= AffMember
+}
+
+// SnapshotInviteContext returns the data needed to construct a mediated-invite
+// forward without holding the room lock for the I/O step.
+func (r *Room) SnapshotInviteContext() (password string, passwordProtected bool, membersOnly bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.config.Password, r.config.PasswordProtected, r.config.MembersOnly
+}
+
 func (r *Room) ApplyOwnerForm(fields map[string]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
