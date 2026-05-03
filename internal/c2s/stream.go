@@ -367,9 +367,21 @@ func handleOutboundMessage(ctx context.Context, s *Session, start xml.StartEleme
 			allRes := s.cfg.Router.SessionsFor(senderBare)
 			jids := make([]stanza.JID, 0, len(allRes))
 			for _, sess := range allRes {
+				// XEP-0280 §6: do NOT carbon back to the very session that
+				// sent the stanza — otherwise sent-carbons loop to the
+				// sender itself (the wrapped <message xmlns='jabber:client'>
+				// inside <forwarded> looked malformed to xmpp-vala and
+				// emitted "no message subnode in jabber:client namespace"
+				// + xmpp_jid_construct null-jid criticals on dino, while
+				// the actual recipient may have raced or been masked).
+				if sess.JID().Equal(s.jid) {
+					continue
+				}
 				jids = append(jids, sess.JID())
 			}
-			_ = mods.Carbons.DeliverCarbons(ctx, s.jid.Bare(), j, routedRaw, 1, jids)
+			if len(jids) > 0 {
+				_ = mods.Carbons.DeliverCarbons(ctx, s.jid.Bare(), j, routedRaw, 1, jids)
+			}
 		}
 	}
 
