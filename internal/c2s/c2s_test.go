@@ -1,6 +1,7 @@
 package c2s
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/xml"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/danielinux/xmppqr/internal/auth"
 	"github.com/danielinux/xmppqr/internal/carbons"
+	"github.com/danielinux/xmppqr/internal/csi"
 	"github.com/danielinux/xmppqr/internal/disco"
 	"github.com/danielinux/xmppqr/internal/ibr"
 	"github.com/danielinux/xmppqr/internal/mam"
@@ -826,6 +828,46 @@ func TestPresenceSubscribeForwarded(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected ask=subscribe in alice's roster for bob")
+	}
+}
+
+func TestReplayOfflineMessagesDeliversQueuedStanzas(t *testing.T) {
+	stores := memstore.New()
+	ctx := context.Background()
+	_, err := stores.Offline.Push(ctx, &storage.OfflineMessage{
+		Owner:  "alice@example.com",
+		TS:     time.Now().UTC(),
+		Stanza: []byte("<message from='bob@example.com' to='alice@example.com'><body>queued</body></message>"),
+	})
+	if err != nil {
+		t.Fatalf("push offline: %v", err)
+	}
+
+	s := &Session{
+		cfg: SessionConfig{Stores: stores},
+		jid: stanza.JID{Local: "alice", Domain: "example.com", Resource: "phone"},
+		outbound: make(chan []byte, 4),
+		csiF: csi.New(),
+		done: make(chan struct{}),
+	}
+
+	s.replayOfflineMessages(ctx)
+
+	select {
+	case raw := <-s.outbound:
+		if !bytes.Contains(raw, []byte("queued")) {
+			t.Fatalf("expected queued message body, got %s", raw)
+		}
+	default:
+		t.Fatal("expected offline message to be replayed")
+	}
+
+	n, err := stores.Offline.Count(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("count offline: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected offline queue drained, got %d remaining", n)
 	}
 }
 

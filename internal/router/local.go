@@ -1,16 +1,24 @@
 package router
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
 	"hash/fnv"
 	"sync"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
+	"github.com/danielinux/xmppqr/internal/storage"
 )
 
 type ParkedStore interface {
 	LookupByJIDStr(fullJID stanza.JID) (string, bool)
 	AppendByToken(token string, raw []byte) error
+}
+
+type OfflineStore interface {
+	Push(ctx context.Context, msg *storage.OfflineMessage) (int64, error)
 }
 
 type Router struct {
@@ -19,6 +27,7 @@ type Router struct {
 	localDomain string
 	remote      RemoteRouter
 	parked      ParkedStore
+	offline     OfflineStore
 }
 
 func New() *Router {
@@ -32,6 +41,12 @@ func New() *Router {
 func (r *Router) SetParkedStore(p ParkedStore) {
 	r.mu.Lock()
 	r.parked = p
+	r.mu.Unlock()
+}
+
+func (r *Router) SetOfflineStore(o OfflineStore) {
+	r.mu.Lock()
+	r.offline = o
 	r.mu.Unlock()
 }
 
@@ -90,6 +105,7 @@ func (r *Router) RouteToBare(ctx context.Context, bare stanza.JID, raw []byte) (
 	r.mu.RLock()
 	domain := r.localDomain
 	remote := r.remote
+	offline := r.offline
 	r.mu.RUnlock()
 
 	if domain != "" && bare.Domain != domain {
@@ -151,7 +167,26 @@ func (r *Router) RouteToBare(ctx context.Context, bare stanza.JID, raw []byte) (
 	}
 
 	if delivered == 0 {
+		if offline != nil && isMessageStanza(raw) {
+			if _, err := offline.Push(ctx, &storage.OfflineMessage{
+				Owner:  bare.String(),
+				TS:     time.Now().UTC(),
+				Stanza: append([]byte(nil), raw...),
+			}); err == nil {
+				return 1, nil
+			}
+		}
 		return 0, ErrNoSession
 	}
 	return delivered, nil
+}
+
+func isMessageStanza(raw []byte) bool {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	se, ok := tok.(xml.StartElement)
+	return ok && se.Name.Local == "message"
 }

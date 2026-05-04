@@ -220,6 +220,22 @@ func (s *Session) parkIfResumable() bool {
 	return true
 }
 
+func (s *Session) replayOfflineMessages(ctx context.Context) {
+	if s.cfg.Stores == nil || s.cfg.Stores.Offline == nil {
+		return
+	}
+	msgs, err := s.cfg.Stores.Offline.Pop(ctx, s.jid.Bare().String(), 0)
+	if err != nil {
+		return
+	}
+	for _, msg := range msgs {
+		if msg == nil || len(msg.Stanza) == 0 {
+			continue
+		}
+		_ = s.Deliver(ctx, msg.Stanza)
+	}
+}
+
 func parseMessageStart(raw []byte) (xml.StartElement, []byte, error) {
 	dec := xml.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()

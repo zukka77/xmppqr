@@ -5,8 +5,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
+	"github.com/danielinux/xmppqr/internal/storage"
 )
 
 type mockRemoteRouter struct {
@@ -30,6 +32,19 @@ type mockSession struct {
 	priority int
 	avail    bool
 	queue    chan []byte
+}
+
+type mockOfflineStore struct {
+	mu   sync.Mutex
+	msgs []*storage.OfflineMessage
+}
+
+func (m *mockOfflineStore) Push(_ context.Context, msg *storage.OfflineMessage) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *msg
+	m.msgs = append(m.msgs, &cp)
+	return int64(len(m.msgs)), nil
 }
 
 func newMock(jidStr string, priority int, avail bool) *mockSession {
@@ -113,6 +128,43 @@ func TestRouteToBare_NoSession(t *testing.T) {
 	_, err := r.RouteToBare(context.Background(), mustBare("ghost@example.com"), []byte("x"))
 	if err != ErrNoSession {
 		t.Fatalf("expected ErrNoSession, got %v", err)
+	}
+}
+
+func TestRouteToBare_QueuesOfflineMessage(t *testing.T) {
+	r := New()
+	offline := &mockOfflineStore{}
+	r.SetOfflineStore(offline)
+
+	n, err := r.RouteToBare(context.Background(), mustBare("ghost@example.com"), []byte("<message to='ghost@example.com'><body>x</body></message>"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected queued delivery count 1, got %d", n)
+	}
+	if len(offline.msgs) != 1 {
+		t.Fatalf("expected 1 queued offline message, got %d", len(offline.msgs))
+	}
+	if offline.msgs[0].Owner != "ghost@example.com" {
+		t.Fatalf("expected owner ghost@example.com, got %q", offline.msgs[0].Owner)
+	}
+	if offline.msgs[0].TS.IsZero() || time.Since(offline.msgs[0].TS) > time.Minute {
+		t.Fatalf("expected recent queue timestamp, got %v", offline.msgs[0].TS)
+	}
+}
+
+func TestRouteToBare_DoesNotQueueOfflinePresence(t *testing.T) {
+	r := New()
+	offline := &mockOfflineStore{}
+	r.SetOfflineStore(offline)
+
+	_, err := r.RouteToBare(context.Background(), mustBare("ghost@example.com"), []byte("<presence to='ghost@example.com' type='subscribed'/>"))
+	if err != ErrNoSession {
+		t.Fatalf("expected ErrNoSession, got %v", err)
+	}
+	if len(offline.msgs) != 0 {
+		t.Fatalf("expected no queued offline messages, got %d", len(offline.msgs))
 	}
 }
 

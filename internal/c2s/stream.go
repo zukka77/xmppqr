@@ -85,6 +85,10 @@ func runStream(ctx context.Context, s *Session) error {
 	defer cancelWriter()
 	go runWriter(writerCtx, s, cancelWriter)
 
+	if s.cfg.Stores != nil && s.cfg.Stores.Offline != nil {
+		s.replayOfflineMessages(ctx)
+	}
+
 	return readerLoop(ctx, s)
 }
 

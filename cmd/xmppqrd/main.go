@@ -105,6 +105,9 @@ func main() {
 	rt.SetLocalDomain(cfg.Server.Domain)
 	resumeStore := sm.NewStore(100_000)
 	rt.SetParkedStore(resumeStore)
+	if stores.Offline != nil {
+		rt.SetOfflineStore(stores.Offline)
+	}
 
 	mods, uploadBackend := buildModules(cfg, stores, rt, logger)
 
