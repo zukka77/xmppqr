@@ -16,12 +16,12 @@ type rawItem struct {
 }
 
 type pubsubRequest struct {
-	op      string
-	node    string
-	items   []rawItem
-	itemID  string
-	max     int
-	subJID  string
+	op     string
+	node   string
+	items  []rawItem
+	itemID string
+	max    int
+	subJID string
 }
 
 func parseRequest(payload []byte) (*pubsubRequest, error) {
@@ -172,7 +172,7 @@ func captureInnerXML(dec *xml.Decoder) ([]byte, error) {
 		switch t := tok.(type) {
 		case xml.StartElement:
 			depth++
-			enc.EncodeToken(t)
+			enc.EncodeToken(stripRedundantDefaultNamespace(t))
 		case xml.EndElement:
 			if depth == 0 {
 				enc.Flush()
@@ -194,6 +194,21 @@ func captureInnerXML(dec *xml.Decoder) ([]byte, error) {
 		return nil, nil
 	}
 	return []byte(b), nil
+}
+
+func stripRedundantDefaultNamespace(start xml.StartElement) xml.StartElement {
+	if start.Name.Space == "" || len(start.Attr) == 0 {
+		return start
+	}
+	filtered := start.Attr[:0]
+	for _, attr := range start.Attr {
+		if attr.Name.Space == "" && attr.Name.Local == "xmlns" && attr.Value == start.Name.Space {
+			continue
+		}
+		filtered = append(filtered, attr)
+	}
+	start.Attr = filtered
+	return start
 }
 
 func attrVal(se xml.StartElement, name string) string {
