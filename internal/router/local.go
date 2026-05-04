@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"hash/fnv"
-	"log"
 	"sync"
 
 	"github.com/danielinux/xmppqr/internal/stanza"
@@ -131,9 +130,6 @@ func (r *Router) RouteToBare(ctx context.Context, bare stanza.JID, raw []byte) (
 			if s.IsAvailable() && s.Priority() == maxPri {
 				if err := s.Deliver(ctx, raw); err == nil {
 					delivered++
-				} else {
-					log.Printf("xmppqr diag: RouteToBare(%s) Deliver to %s failed: %v",
-						key, s.JID().String(), err)
 				}
 			}
 		}
@@ -147,24 +143,15 @@ func (r *Router) RouteToBare(ctx context.Context, bare stanza.JID, raw []byte) (
 		// MUC-routed groupchats reach them just fine — pure asymmetry
 		// that surfaces as "Conversations doesn't see dino's pairwise
 		// sender-chain announcements". Deliver to every bound session.
-		log.Printf("xmppqr diag: RouteToBare(%s) — no AVAILABLE sessions (total=%d); falling back to bound-session delivery",
-			key, totalSessions)
 		for _, s := range list {
 			if err := s.Deliver(ctx, raw); err == nil {
 				delivered++
-			} else {
-				log.Printf("xmppqr diag: RouteToBare(%s) bound-fallback Deliver to %s failed: %v",
-					key, s.JID().String(), err)
 			}
 		}
 	}
 
 	if delivered == 0 {
-		log.Printf("xmppqr diag: RouteToBare(%s) — no session (total=%d available=%d)",
-			key, totalSessions, availableCount)
 		return 0, ErrNoSession
 	}
-	log.Printf("xmppqr diag: RouteToBare(%s) delivered to %d session(s) (total=%d available=%d)",
-		key, delivered, totalSessions, availableCount)
 	return delivered, nil
 }
