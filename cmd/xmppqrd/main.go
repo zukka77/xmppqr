@@ -39,6 +39,7 @@ import (
 	"github.com/danielinux/xmppqr/internal/router"
 	"github.com/danielinux/xmppqr/internal/s2s"
 	"github.com/danielinux/xmppqr/internal/sm"
+	"github.com/danielinux/xmppqr/internal/stanza"
 	"github.com/danielinux/xmppqr/internal/x3dhpq"
 	"github.com/danielinux/xmppqr/internal/storage"
 	"github.com/danielinux/xmppqr/internal/storage/memstore"
@@ -291,6 +292,14 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 	capsCache := caps.New()
 	ps := pubsub.New(stores.PEP, rt, logger, int64(cfg.Modules.X3DHPQItemMaxBytes))
 	ps.WithContactNotify(rosterMgr, capsCache)
+	bundleLimits := x3dhpq.DefaultLimits()
+	if cfg.Modules.X3DHPQItemMaxBytes > 0 {
+		bundleLimits.ItemMaxBytes = int64(cfg.Modules.X3DHPQItemMaxBytes)
+	}
+	bundleRate := x3dhpq.NewRateChecker(bundleLimits)
+	ps.WithPublishLimiter(bundleRate)
+	pairLimiter := x3dhpq.NewPairLimiter(x3dhpq.DefaultPairLimiterConfig())
+	verify := x3dhpq.NewVerifyDevice(verifyRouterAdapter{rt: rt}, pairLimiter, logger)
 
 	uploadSvc := httpupload.New(
 		cfg.Server.Domain,
@@ -331,10 +340,31 @@ func buildModules(cfg *config.Config, stores *storage.Stores, rt *router.Router,
 		MUC:        muc.New(cfg.Server.Domain, "conference", stores.MUC, mamSvc, ps, rt, logger),
 		Metrics:    metrics.New(nil),
 		X3DHPQPolicy: x3dhpq.DomainPolicy{X3DHPQOnlyMode: false},
+		X3DHPQVerify: verify,
+		X3DHPQPairLimiter: pairLimiter,
 		Caps:       capsCache,
 		IBR:        ibr.New(stores, cfg.Server.Domain, cfg.Modules.IBR),
 	}
 	return mods, diskBackend
+}
+
+// verifyRouterAdapter bridges router.Router to x3dhpq.Router. Defined in main
+// to keep internal/x3dhpq free of a router import.
+type verifyRouterAdapter struct {
+	rt *router.Router
+}
+
+func (a verifyRouterAdapter) SessionsFor(bareJID string) []x3dhpq.RouterSession {
+	sess := a.rt.SessionsFor(bareJID)
+	out := make([]x3dhpq.RouterSession, len(sess))
+	for i, s := range sess {
+		out[i] = s
+	}
+	return out
+}
+
+func (a verifyRouterAdapter) RouteToFull(ctx context.Context, full stanza.JID, raw []byte) error {
+	return a.rt.RouteToFull(ctx, full, raw)
 }
 
 func buildMetricsMux() http.Handler {

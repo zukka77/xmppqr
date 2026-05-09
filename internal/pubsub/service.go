@@ -17,12 +17,19 @@ type rosterGetter interface {
 }
 
 type Service struct {
-	store        storage.PEPStore
-	router       *router.Router
-	logger       *slog.Logger
-	itemMaxBytes int64
-	roster       rosterGetter
-	caps         *caps.Cache
+	store          storage.PEPStore
+	router         *router.Router
+	logger         *slog.Logger
+	itemMaxBytes   int64
+	roster         rosterGetter
+	caps           *caps.Cache
+	publishLimiter publishLimiter
+}
+
+// publishLimiter is the surface area pubsub uses for per-node rate limiting.
+// Decoupled from internal/x3dhpq to avoid an import cycle.
+type publishLimiter interface {
+	AllowPublish(node, itemID string) bool
 }
 
 func New(store storage.PEPStore, r *router.Router, logger *slog.Logger, itemMaxBytes int64) *Service {
@@ -40,6 +47,10 @@ func New(store storage.PEPStore, r *router.Router, logger *slog.Logger, itemMaxB
 func (svc *Service) WithContactNotify(roster rosterGetter, c *caps.Cache) {
 	svc.roster = roster
 	svc.caps = c
+}
+
+func (svc *Service) WithPublishLimiter(l publishLimiter) {
+	svc.publishLimiter = l
 }
 
 func (svc *Service) contactNotifyEnabled() bool {

@@ -81,6 +81,9 @@ func (svc *Service) handlePublish(ctx context.Context, owner stanza.JID, iq *sta
 		if svc.itemMaxBytes > 0 && int64(len(it.Payload)) > svc.itemMaxBytes {
 			return iqError(iq, stanza.ErrorTypeModify, stanza.ErrPolicyViolation)
 		}
+		if svc.publishLimiter != nil && !svc.publishLimiter.AllowPublish(node, it.ID) {
+			return iqError(iq, stanza.ErrorTypeWait, stanza.ErrPolicyViolation)
+		}
 		pepItem := &storage.PEPItem{
 			Owner:       owner.Bare().String(),
 			Node:        node,

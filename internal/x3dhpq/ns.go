@@ -12,4 +12,10 @@ const (
 	NSGroup    = "urn:xmppqr:x3dhpq:group:0"
 )
 
+const (
+	ElemPair         = "pair"
+	ElemVerifyDevice = "verify-device"
+	ElemPeers        = "peers"
+)
+
 func PlusNotify(ns string) string { return ns + "+notify" }

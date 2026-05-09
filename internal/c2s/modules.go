@@ -36,6 +36,8 @@ type Modules struct {
 	MUC        *muc.Service
 	Metrics    *metrics.Metrics
 	X3DHPQPolicy x3dhpq.DomainPolicy
+	X3DHPQVerify *x3dhpq.VerifyDevice
+	X3DHPQPairLimiter *x3dhpq.PairLimiter
 	Caps       *caps.Cache
 	IBR        *ibr.Service
 }

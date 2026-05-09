@@ -540,7 +540,7 @@ The bundle (`PublicBundle`) contains:
 - `DeviceCert`: the device's DC (Section 7.3).
 - `IdentityPubX25519`: the DIK's X25519 public key (32 bytes) — used as the IK in X3DH.
 - `SPKPub`: the current Signed Pre-Key (X25519, 32 bytes).
-- `SPKSig`: Ed25519 signature by the DIK over the SPK public key bytes.
+- `SPKSig`: Ed25519 signature by the DIK over the SPK public key bytes. The signing input is **exactly the 32-byte X25519 public key** (`SPKPub`) — no length prefix, no SPK id, no domain-separation tag. Verification computes the signature over the same 32 bytes. This matches the OMEMO (XEP-0384) convention. The SPK id is carried as a separate attribute on the `<spk>` wire element (see §9.1.1) and identifies which signed pre-key was used; it is not part of the signed input.
 - `KEMPreKeys`: one or more ML-KEM-768 encapsulation public keys (each 1184 bytes), each with an ID.
 - `OPKs`: one or more X25519 one-time pre-keys (each 32 bytes), each with an ID.
 
@@ -1313,6 +1313,78 @@ This is a domain-wide policy, not per-session negotiated. Legacy OMEMO-only clie
 Once a client has observed x3dhpq capability for a peer (via disco caps or by successfully exchanging an x3dhpq stanza), the client SHOULD persist this fact and MUST raise a UX warning if a subsequent conversation with that peer falls back to OMEMO or plaintext. The server cannot enforce this directly — clients can choose to ignore capability claims — but the visible UX event prevents silent downgrade attacks where a malicious server hides x3dhpq feature advertisements.
 
 Per-domain x3dhpq-only mode (`X3DHPQOnlyMode`) refuses delivery of plaintext-bodied messages to local users. This is the only protocol-level enforcement available; the rest is client UX.
+
+### 15.8. Verify-device Hint (Project-internal Extension)
+
+This subsection describes a project-internal server extension to the pairing
+namespace. It is NOT part of the XEP submission to the XSF and is implemented
+by the reference server (`xmppqrd`) and the reference clients (Dino, Conversations).
+External implementations MAY adopt the same wire format for compatibility.
+
+**Motivation.** The pairing FSM (Section 10) requires the new device and an
+existing primary device to find each other. When both resources are bound to
+the same bare JID at the same XMPP server, the server already knows the full
+JIDs of all bound resources; clients do not. This extension lets the new
+device ask the server "tell my other resources I am here" without leaking the
+new device's pairing payload to the server.
+
+**Wire format.**
+
+A freshly-bound resource that has not yet been issued a Device Certificate
+sends an IQ-set to its own bare JID:
+
+```xml
+<iq type='set' id='vd-1'>
+  <verify-device xmlns='urn:xmppqr:x3dhpq:pair:0'
+                 device-id='1234567'
+                 transport='message'/>
+</iq>
+```
+
+The `to` attribute MUST be either absent or equal to the bare JID of the
+authenticated session. The `device-id` is the decimal uint32 identifier the
+new device intends to claim. The `transport` attribute is informative; the
+only currently defined value is `"message"`, indicating that the pairing FSM
+will run over `<message>` stanzas (Section 16.4).
+
+The server MUST:
+1. Reject the IQ with `<forbidden/>` if the `to` attribute is not the bare JID
+   of the authenticated session, or if the session is bound to a bare (no
+   resource) JID.
+2. Look up all currently-authenticated resources of the same bare JID and
+   exclude the originator's own full JID.
+3. If at least one peer resource is bound, fan out a single
+   `<message type='headline'>` to each peer:
+   ```xml
+   <message type='headline' from='alice@example.org' to='alice@example.org/desktop' id='vd-1'>
+     <verify-device xmlns='urn:xmppqr:x3dhpq:pair:0'
+                    new-resource='alice@example.org/phone-2026'
+                    device-id='1234567'/>
+   </message>
+   ```
+   and reply to the originator with:
+   ```xml
+   <iq type='result' id='vd-1' from='alice@example.org' to='alice@example.org/phone-2026'>
+     <peers xmlns='urn:xmppqr:x3dhpq:pair:0' count='2'/>
+   </iq>
+   ```
+4. If no peer resource is bound, reject with `<not-acceptable/>` and the text
+   "no peer resources". The new device interprets this as "first device on
+   this account" and falls back to a fresh AIK-generation prompt or OOB QR
+   recovery.
+
+**Server opacity is preserved.** The server inspects only the
+addressing-relevant attributes (`device-id`, `transport`); it never reads or
+forwards CPace transcript bytes, DC payloads, or any other pairing-payload
+data. The verify-device verb only allocates a rendezvous channel — the
+pairing FSM (Section 10) runs end-to-end between the two resources and is
+opaque to the server.
+
+**Rate limit.** The server SHOULD rate-limit `<verify-device>` IQs per
+authenticated full JID (suggested: 3 attempts per minute) and per
+`(resource_from, resource_to)` pair for `<message>` stanzas in the pairing
+namespace (suggested: 5 stanzas per 10 seconds; token-bucket). On exceedance
+the server returns `<policy-violation/>`.
 
 ---
 

@@ -2,7 +2,6 @@
 package x3dhpqcrypto
 
 import (
-	"encoding/binary"
 	"errors"
 
 	"github.com/danielinux/xmppqr/internal/wolfcrypt"
@@ -70,10 +69,14 @@ type PublicBundle struct {
 	OPKs               []*PublicOPK
 }
 
-func spkSignInput(pub []byte, id uint32) []byte {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, id)
-	return append(b, pub...)
+// spkSignInput returns the canonical SignedPreKey signing input per XEP §9.1:
+// the Ed25519 signature is computed over the SPK public key bytes alone (no
+// id prefix). The id parameter is retained for API stability but is unused;
+// the SPK id is carried as a separate field in the bundle wire format.
+func spkSignInput(pub []byte, _ uint32) []byte {
+	out := make([]byte, len(pub))
+	copy(out, pub)
+	return out
 }
 
 func NewBundle(dik *DeviceIdentityKey, dc *DeviceCertificate, kemPreKeys, otpks int) (*Bundle, error) {

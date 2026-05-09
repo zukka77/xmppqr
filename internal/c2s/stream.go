@@ -357,6 +357,19 @@ func handleOutboundMessage(ctx context.Context, s *Session, start xml.StartEleme
 		}
 	}
 
+	if mods != nil && mods.X3DHPQPairLimiter != nil && messageFirstChildNS(raw) == x3dhpq.NSPair {
+		if !mods.X3DHPQPairLimiter.AllowPair(s.jid.String(), j.String()) {
+			errMsg := fmt.Sprintf(
+				`<message to='%s' from='%s' type='error'><error type='wait'><policy-violation xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></message>`,
+				xmlEscape(s.jid.String()),
+				xmlEscape(j.String()),
+			)
+			_, _ = s.enc.WriteRaw([]byte(errMsg))
+			atomic.AddUint32(&s.smInH, 1)
+			return nil
+		}
+	}
+
 	routedRaw := rewriteStanzaFrom(raw, s.jid.String())
 
 	if mods != nil {
@@ -758,6 +771,13 @@ func dispatchLocalIQ(ctx context.Context, s *Session, iq *stanza.IQ) ([]byte, er
 		if mods != nil && mods.Carbons != nil {
 			return handleCarbonsIQ(s, iq)
 		}
+	case x3dhpq.NSPair:
+		if mods != nil && mods.X3DHPQVerify != nil && firstChildLocal(iq.Payload) == x3dhpq.ElemVerifyDevice {
+			if iq.From == "" {
+				iq.From = s.jid.String()
+			}
+			return mods.X3DHPQVerify.HandleIQ(ctx, s.jid, iq)
+		}
 	}
 
 	se := &stanza.StanzaError{Type: stanza.ErrorTypeCancel, Condition: stanza.ErrFeatureNotImplemented}
@@ -928,6 +948,39 @@ func parsePushEnable(payload []byte) (svcJID, node string, formXML []byte) {
 		formXML = formBuf.Bytes()
 	}
 	return
+}
+
+// messageFirstChildNS returns the namespace of the first child element of a
+// `<message>` stanza, ignoring text and the message element itself.
+func messageFirstChildNS(raw []byte) string {
+	dec := xml.NewDecoder(bytes.NewReader(raw))
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+			if depth == 1 {
+				continue
+			}
+			if depth == 2 {
+				ns := t.Name.Space
+				if ns == "" {
+					for _, a := range t.Attr {
+						if a.Name.Local == "xmlns" {
+							ns = a.Value
+						}
+					}
+				}
+				return ns
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
 }
 
 func firstChildNS(payload []byte) string {

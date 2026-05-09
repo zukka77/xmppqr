@@ -251,6 +251,158 @@ func TestBundleItemSizeCap(t *testing.T) {
 	}
 }
 
+func TestVerifyDeviceFanOut(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	a1 := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a1.Close()
+	a2 := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a2.Close()
+	a3 := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a3.Close()
+
+	if err := a1.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("a1 presence: %v", err)
+	}
+	if err := a2.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("a2 presence: %v", err)
+	}
+	if err := a3.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("a3 presence: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	verifyIQ := `<iq type='set' id='vd-1'><verify-device xmlns='urn:xmppqr:x3dhpq:pair:0' device-id='1234567' transport='message'/></iq>`
+	if err := a3.Send([]byte(verifyIQ)); err != nil {
+		t.Fatalf("send verify-device: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	_, raw := waitForStanza(t, a3, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "iq" && bytes.Contains(raw, []byte("vd-1"))
+	})
+	if !bytes.Contains(raw, []byte("type='result'")) && !bytes.Contains(raw, []byte("type=\"result\"")) {
+		t.Fatalf("expected result IQ; got %s", raw)
+	}
+	if !bytes.Contains(raw, []byte("count='2'")) && !bytes.Contains(raw, []byte("count=\"2\"")) {
+		t.Fatalf("expected peers count=2; got %s", raw)
+	}
+
+	for i, c := range []*Client{a1, a2} {
+		deadline := time.Now().Add(2 * time.Second)
+		_, raw := waitForStanza(t, c, deadline, func(se xml.StartElement, raw []byte) bool {
+			return se.Name.Local == "message" &&
+				bytes.Contains(raw, []byte("verify-device")) &&
+				bytes.Contains(raw, []byte("urn:xmppqr:x3dhpq:pair:0"))
+		})
+		if !bytes.Contains(raw, []byte(`new-resource='`+a3.JID().String()+`'`)) &&
+			!bytes.Contains(raw, []byte(`new-resource="`+a3.JID().String()+`"`)) {
+			t.Fatalf("a%d: expected new-resource=%s; got %s", i+1, a3.JID().String(), raw)
+		}
+		if !bytes.Contains(raw, []byte("device-id='1234567'")) && !bytes.Contains(raw, []byte("device-id=\"1234567\"")) {
+			t.Fatalf("a%d: expected device-id=1234567; got %s", i+1, raw)
+		}
+		if !bytes.Contains(raw, []byte("type='headline'")) && !bytes.Contains(raw, []byte("type=\"headline\"")) {
+			t.Fatalf("a%d: expected type=headline; got %s", i+1, raw)
+		}
+	}
+}
+
+func TestVerifyDeviceNoPeers(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+	if err := a.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("presence: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if err := a.Send([]byte(`<iq type='set' id='vd-x'><verify-device xmlns='urn:xmppqr:x3dhpq:pair:0' device-id='99'/></iq>`)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	_, raw := waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "iq" && bytes.Contains(raw, []byte("vd-x"))
+	})
+	if !bytes.Contains(raw, []byte("type='error'")) && !bytes.Contains(raw, []byte("type=\"error\"")) {
+		t.Fatalf("expected error IQ; got %s", raw)
+	}
+	if !bytes.Contains(raw, []byte("not-acceptable")) {
+		t.Fatalf("expected not-acceptable; got %s", raw)
+	}
+}
+
+func TestPairStanzaRateLimit(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	a1 := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a1.Close()
+	a2 := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a2.Close()
+	if err := a1.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("a1 presence: %v", err)
+	}
+	if err := a2.Send([]byte(`<presence/>`)); err != nil {
+		t.Fatalf("a2 presence: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	for i := 0; i < 5; i++ {
+		msg := fmt.Sprintf(`<message to='%s' id='p-%d'><pair xmlns='urn:xmppqr:x3dhpq:pair:0' step='1' sid='abc'>OK</pair></message>`, a2.JID().String(), i)
+		if err := a1.Send([]byte(msg)); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	time.Sleep(150 * time.Millisecond)
+	burst := fmt.Sprintf(`<message to='%s' id='p-burst'><pair xmlns='urn:xmppqr:x3dhpq:pair:0' step='1' sid='abc'>OVER</pair></message>`, a2.JID().String())
+	if err := a1.Send([]byte(burst)); err != nil {
+		t.Fatalf("send burst: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	_, raw := waitForStanza(t, a1, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "message" && bytes.Contains(raw, []byte("policy-violation"))
+	})
+	if !bytes.Contains(raw, []byte("policy-violation")) {
+		t.Fatalf("expected policy-violation echo; got %s", raw)
+	}
+}
+
+func TestBundleRepublishRateLimit(t *testing.T) {
+	h := NewHarness(t)
+	defer h.Close()
+	h.AddUser(t, "alice", "pw")
+
+	a := MustDial(t, h.TLSAddr(), h.Domain, "alice", "pw")
+	defer a.Close()
+
+	node := "urn:xmppqr:x3dhpq:bundle:0"
+	bundleXML := `<bundle xmlns='urn:xmppqr:x3dhpq:bundle:0'><identity>YQ==</identity></bundle>`
+	if err := publishPEPItem(a, node, "1234", bundleXML); err != nil {
+		t.Fatalf("publish 1: %v", err)
+	}
+	waitForIQResult(t, a, "1234")
+
+	repubIQ := fmt.Sprintf(`<iq type='set' id='pub-1234-again'><pubsub xmlns='http://jabber.org/protocol/pubsub'><publish node='%s'><item id='1234'>%s</item></publish></pubsub></iq>`, node, bundleXML)
+	if err := a.Send([]byte(repubIQ)); err != nil {
+		t.Fatalf("send repub: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	_, raw := waitForStanza(t, a, deadline, func(se xml.StartElement, raw []byte) bool {
+		return se.Name.Local == "iq" && bytes.Contains(raw, []byte("pub-1234-again"))
+	})
+	if !bytes.Contains(raw, []byte("policy-violation")) {
+		t.Fatalf("expected policy-violation on rapid bundle republish; got %s", raw)
+	}
+}
+
 func TestMUCAIKExtensionPreservedOnBroadcast(t *testing.T) {
 	h := NewHarness(t)
 	defer h.Close()

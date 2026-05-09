@@ -309,6 +309,13 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 	ps := pubsub.New(stores.PEP, rt, slog.Default(), 65536)
 	ps.WithContactNotify(rosterMgr, capsCache)
 
+	bundleLimits := x3dhpq.DefaultLimits()
+	bundleLimits.ItemMaxBytes = 65536
+	bundleRate := x3dhpq.NewRateChecker(bundleLimits)
+	ps.WithPublishLimiter(bundleRate)
+	pairLimiter := x3dhpq.NewPairLimiter(x3dhpq.DefaultPairLimiterConfig())
+	verify := x3dhpq.NewVerifyDevice(verifyRouterAdapter{rt: rt}, pairLimiter, slog.Default())
+
 	carbMgr := carbons.New(rt, slog.Default())
 	mamSvc := mam.New(stores.MAM, slog.Default())
 	mods := &c2s.Modules{
@@ -327,6 +334,8 @@ func newHarnessCore(t *testing.T, domain string, allowIBR bool) *Harness {
 		MUC:        muc.New(domain, "conference", stores.MUC, mamSvc, ps, rt, slog.Default()),
 		Metrics:    metrics.New(prometheus.NewRegistry()),
 		X3DHPQPolicy: x3dhpq.DomainPolicy{X3DHPQOnlyMode: false},
+		X3DHPQVerify: verify,
+		X3DHPQPairLimiter: pairLimiter,
 		Caps:       capsCache,
 		IBR:        ibr.New(stores, domain, allowIBR),
 	}
@@ -554,3 +563,20 @@ func seedUser(ctx context.Context, stores *storage.Stores, username, domain, pas
 	return stores.Users.Put(ctx, u)
 }
 
+
+type verifyRouterAdapter struct {
+	rt *router.Router
+}
+
+func (a verifyRouterAdapter) SessionsFor(bareJID string) []x3dhpq.RouterSession {
+	sess := a.rt.SessionsFor(bareJID)
+	out := make([]x3dhpq.RouterSession, len(sess))
+	for i, s := range sess {
+		out[i] = s
+	}
+	return out
+}
+
+func (a verifyRouterAdapter) RouteToFull(ctx context.Context, full stanza.JID, raw []byte) error {
+	return a.rt.RouteToFull(ctx, full, raw)
+}

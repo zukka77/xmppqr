@@ -33,6 +33,23 @@ func NewRateChecker(l Limits) *RateChecker {
 	}
 }
 
+// AllowPublish satisfies pubsub's publishLimiter contract: only nodes in
+// `urn:xmppqr:x3dhpq:bundle:0` are subject to the per-device-id rate limit;
+// all other nodes pass through. The bundle node is keyed by the item id
+// (decimal device id), so deviceKey == itemID.
+func (rc *RateChecker) AllowPublish(node, itemID string) bool {
+	if rc == nil {
+		return true
+	}
+	if node != NSBundle {
+		return true
+	}
+	if itemID == "" {
+		return true
+	}
+	return rc.Allow(itemID)
+}
+
 func (rc *RateChecker) Allow(deviceKey string) bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
