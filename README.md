@@ -64,7 +64,7 @@ After cloning the repository, build working binaries with the local wolfSSL
 wrapper:
 
 ```bash
-git clone https://github.com/zukka77/xmppqr
+git clone https://github.com/danielinux/xmppqr
 cd xmppqr
 ./scripts/build-xmppqrd-local-wolfssl.sh
 ```
