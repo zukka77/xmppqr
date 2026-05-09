@@ -2,22 +2,39 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SUBMODULE="$ROOT/deps/wolfssl"
-PREFIX="${XMPPQR_WOLFSSL_PREFIX:-$ROOT/.local/wolfssl-v5.9.1}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')}"
 
-if [[ ! -d "$SUBMODULE/.git" && ! -f "$SUBMODULE/.git" ]]; then
-    git -C "$ROOT" submodule update --init --checkout deps/wolfssl
+. "$ROOT/scripts/wolfssl-env.sh"
+wolfssl_resolve_env "$ROOT" "${1:-}"
+
+if [[ ! -d "$WOLFSSL_SRC_DIR" ]]; then
+    mkdir -p "$(dirname "$WOLFSSL_ARCHIVE")"
+    if [[ ! -f "$WOLFSSL_ARCHIVE" ]]; then
+        curl -fsSL \
+            "https://github.com/wolfSSL/wolfssl/archive/refs/tags/$WOLFSSL_ARCHIVE_REF.tar.gz" \
+            -o "$WOLFSSL_ARCHIVE"
+    fi
+    tmpdir="$(mktemp -d "$ROOT/.local/src/wolfssl-extract.XXXXXX")"
+    trap 'rm -rf "$tmpdir"' EXIT
+    tar -xzf "$WOLFSSL_ARCHIVE" -C "$tmpdir"
+    extracted="$(find "$tmpdir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+    if [[ -z "$extracted" ]]; then
+        printf 'failed to extract wolfSSL archive: %s\n' "$WOLFSSL_ARCHIVE" >&2
+        exit 1
+    fi
+    mv "$extracted" "$WOLFSSL_SRC_DIR"
+    rm -rf "$tmpdir"
+    trap - EXIT
 fi
 
-if [[ ! -x "$SUBMODULE/configure" ]]; then
-    (cd "$SUBMODULE" && ./autogen.sh)
+if [[ ! -x "$WOLFSSL_SRC_DIR/configure" ]]; then
+    (cd "$WOLFSSL_SRC_DIR" && ./autogen.sh)
 fi
 
-mkdir -p "$PREFIX"
+mkdir -p "$WOLFSSL_PREFIX"
 
 configure_args=(
-    "--prefix=$PREFIX"
+    "--prefix=$WOLFSSL_PREFIX"
     "--disable-shared"
     "--enable-static"
     "--disable-examples"
@@ -40,14 +57,14 @@ configure_args=(
 )
 
 (
-    cd "$SUBMODULE"
+    cd "$WOLFSSL_SRC_DIR"
     CFLAGS="${CFLAGS:-"-O2 -fPIC"}" ./configure "${configure_args[@]}"
     make -j"$JOBS"
     make install
 )
 
-lib="$PREFIX/lib/libwolfssl.a"
-pc="$PREFIX/lib/pkgconfig/wolfssl.pc"
+lib="$WOLFSSL_PREFIX/lib/libwolfssl.a"
+pc="$WOLFSSL_PREFIX/lib/pkgconfig/wolfssl.pc"
 if [[ ! -f "$lib" ]]; then
     printf 'missing expected static library: %s\n' "$lib" >&2
     exit 1
@@ -69,10 +86,10 @@ required_symbols=(
 )
 
 for symbol in "${required_symbols[@]}"; do
-    if ! nm -g "$lib" | grep -Eq "[[:space:]]${symbol}$"; then
+    if ! nm -g "$lib" | awk -v symbol="$symbol" '$NF == symbol { found = 1 } END { exit found ? 0 : 1 }'; then
         printf 'local wolfSSL is missing required symbol: %s\n' "$symbol" >&2
         exit 1
     fi
 done
 
-printf 'local wolfSSL ready: %s\n' "$PREFIX"
+printf 'local wolfSSL ready: %s (%s)\n' "$WOLFSSL_PREFIX" "$WOLFSSL_REF"

@@ -1,3 +1,0 @@
-[submodule "deps/wolfssl"]
-	path = deps/wolfssl
-	url = https://github.com/wolfSSL/wolfssl.git
