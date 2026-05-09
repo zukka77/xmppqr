@@ -67,6 +67,19 @@ go build -o ./xmppqrd ./cmd/xmppqrd
 go build -o ./xmppqrctl ./cmd/xmppqrctl
 ```
 
+If your distro wolfSSL was not built with the features used by this tree,
+build the daemon against the pinned local wolfSSL submodule instead:
+
+```bash
+git submodule update --init --checkout deps/wolfssl
+./scripts/build-xmppqrd-local-wolfssl.sh
+```
+
+That script builds wolfSSL `v5.9.1-stable` into `.local/wolfssl-v5.9.1`
+as a static library and runs the daemon build with `PKG_CONFIG_LIBDIR`
+pointing at the local `wolfssl.pc`. Plain `go build` continues to use the
+system `pkg-config wolfssl` configuration.
+
 If you only want to check the admin CLI path:
 
 ```bash
